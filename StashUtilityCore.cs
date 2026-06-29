@@ -373,9 +373,10 @@ namespace StashUtility
                                 }
                                 ImGui.TreePop();
                             }
-                            if (modsComp.StatsFromMods.Count > 0)
+                            var statsFromMods = GetStatsFromMods(modsComp);
+                            if (statsFromMods.Count > 0)
                             {
-                                ImGuiHelper.StatsWidget(modsComp.StatsFromMods, "Stats From Mods");
+                                ImGuiHelper.StatsWidget(statsFromMods, "Stats From Mods");
                             }
                         }
 
@@ -901,19 +902,20 @@ namespace StashUtility
 
             if (item.TryGetComponent<Mods>(out var modsComp))
             {
-                if (modsComp.StatsFromMods.TryGetValue((GameStats)8210, out var rawDropChance))
+                var statsFromMods = GetStatsFromMods(modsComp);
+                if (statsFromMods.TryGetValue((GameStats)8210, out var rawDropChance))
                 {
                     dropChance = rawDropChance;
                 }
-                if (modsComp.StatsFromMods.TryGetValue((GameStats)8206, out var rawRarity))
+                if (statsFromMods.TryGetValue((GameStats)8206, out var rawRarity))
                 {
                     rarityBonus = rawRarity;
                 }
-                if (modsComp.StatsFromMods.TryGetValue((GameStats)8208, out var rawMonsterRarity))
+                if (statsFromMods.TryGetValue((GameStats)8208, out var rawMonsterRarity))
                 {
                     monsterRarity = rawMonsterRarity;
                 }
-                if (modsComp.StatsFromMods.TryGetValue((GameStats)8209, out var rawMonsterEffectiveness))
+                if (statsFromMods.TryGetValue((GameStats)8209, out var rawMonsterEffectiveness))
                 {
                     monsterEffectiveness = rawMonsterEffectiveness;
                 }
@@ -1133,6 +1135,31 @@ namespace StashUtility
                 return ((int)MathF.Round(value)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
             return value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private Dictionary<GameStats, int> GetStatsFromMods(Mods modsComponent)
+        {
+            var stats = new Dictionary<GameStats, int>();
+            if (modsComponent == null || modsComponent.Address == IntPtr.Zero)
+            {
+                return stats;
+            }
+
+            try
+            {
+                var data = ReadMemory<GameOffsets.Objects.Components.ModsOffsets>(modsComponent.Address);
+                var mystats = ReadStdVector<GameOffsets.Objects.Components.StatArrayStruct>(data.Details0.StatsFromMods);
+                foreach (var newStat in mystats)
+                {
+                    stats[(GameStats)newStat.key] = newStat.value;
+                }
+            }
+            catch
+            {
+                // Ignored
+            }
+
+            return stats;
         }
 
         private static int ExtractFirstNumber(string text)
@@ -1559,7 +1586,8 @@ namespace StashUtility
                         lines.Add($"  - {m.name}: values = ({m.values.value0}, {m.values.value1})");
                     }
                     lines.Add("Mods StatsFromMods:");
-                    foreach (var stat in modsComp.StatsFromMods)
+                    var statsFromMods = GetStatsFromMods(modsComp);
+                    foreach (var stat in statsFromMods)
                     {
                         lines.Add($"  - {stat.Key} ({(int)stat.Key}) = {stat.Value}");
                     }
