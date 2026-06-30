@@ -1156,8 +1156,10 @@ namespace StashUtility
             if (modsComponent != null)
             {
                 var statsFromMods = GetStatsFromMods(modsComponent);
+                bool hasMemoryStats = statsFromMods.Count > 0;
                 if (statsFromMods.TryGetValue((GameStats)8210, out var rawDropChance)) sumDropChance = rawDropChance;
                 if (statsFromMods.TryGetValue((GameStats)8206, out var rawRarity)) sumRarity = rawRarity;
+                if (statsFromMods.TryGetValue((GameStats)8207, out var rawPackSize)) sumPackSize = rawPackSize;
                 if (statsFromMods.TryGetValue((GameStats)8208, out var rawMonsterRarity)) sumMonstRarity = rawMonsterRarity;
                 if (statsFromMods.TryGetValue((GameStats)8209, out var rawMonsterEffectiveness)) sumEffect = rawMonsterEffectiveness;
 
@@ -1204,11 +1206,14 @@ namespace StashUtility
 
                         if (def != null)
                         {
-                            if (sumRarity == 0) sumRarity += def.ItemRarity;
-                            if (sumPackSize == 0) sumPackSize += def.PackSize;
-                            if (sumMonstRarity == 0) sumMonstRarity += def.MonsterRarity;
-                            if (sumEffect == 0) sumEffect += def.MonsterEffectiveness;
-                            if (sumDropChance == 0) sumDropChance += def.WaystoneDropChance;
+                            if (!hasMemoryStats)
+                            {
+                                sumRarity += def.ItemRarity;
+                                sumPackSize += def.PackSize;
+                                sumMonstRarity += def.MonsterRarity;
+                                sumEffect += def.MonsterEffectiveness;
+                                sumDropChance += def.WaystoneDropChance;
+                            }
 
                             if (Settings.BadModPatterns.Contains(def.Id))
                             {
