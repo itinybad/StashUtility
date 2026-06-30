@@ -2,7 +2,9 @@
 
 StashUtility is a plugin for **GameHelper2** designed to manage, filter, and highlight Waystones and Precursor/Breach Tablets for Path of Exile 2. It scans active stash tabs and your character's inventory, applying configurable criteria and mod matching to help you quickly identify run-ready items and avoid undesirable modifiers.
 
-![StashUtility Showcase](images/demo.png)
+![Plugins UI Showcase](images/PluginsUI.jpg)
+![Tablet Showcase](images/Tablet.jpg)
+![Waystone Showcase](images/Waystone.jpg)
 
 ---
 

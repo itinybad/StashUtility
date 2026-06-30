@@ -796,9 +796,24 @@ namespace StashUtility
                 return;
             }
 
-            int[] stashTabsContainerPath = pathIndices.Length >= 6 
-                ? pathIndices.Take(6).ToArray() 
-                : new int[] { 2, 0, 0, 0, 1, 1 };
+            int[] stashTabsContainerPath;
+            if (pathIndices.Length >= 12 && pathIndices[pathIndices.Length - 4] == 0 && pathIndices[pathIndices.Length - 3] == 0 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
+            {
+                // Fragment stash tab layout (e.g. 2,0,0,0,0,1,1,40,0,0,0,1)
+                stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 5).ToArray();
+            }
+            else if (pathIndices.Length >= 9 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
+            {
+                // Waystone stash tab layout (e.g. 2,0,0,0,1,1,45,0,1)
+                stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 3).ToArray();
+            }
+            else
+            {
+                // Fallback / default behavior
+                stashTabsContainerPath = pathIndices.Length >= 6 
+                    ? pathIndices.Take(6).ToArray() 
+                    : new int[] { 2, 0, 0, 0, 1, 1 };
+            }
 
             var stashTabsContainer = ResolvePath(gameUi.LeftPanel.Address, stashTabsContainerPath);
             if (stashTabsContainer != IntPtr.Zero)
@@ -835,11 +850,28 @@ namespace StashUtility
 
                     if (!processedAsWaystone)
                     {
-                        // 2. Otherwise, check if it's a normal/quad stash tab: activeTabAddr -> 0 -> 0 has slots directly
-                        var normalGridRoot = ResolvePath(activeTabAddr, new int[] { 0, 0 });
-                        if (normalGridRoot != IntPtr.Zero)
+                        // 2. Check if it's a Fragment stash tab with tablets: activeTabAddr -> 0 -> 0 -> 0 -> 1 has 6 children (pages)
+                        bool processedAsFragmentTablets = false;
+                        var fragmentTabletsRoot = ResolvePath(activeTabAddr, new int[] { 0, 0, 0, 1 });
+                        if (fragmentTabletsRoot != IntPtr.Zero)
                         {
-                            ProcessNormalTab(normalGridRoot);
+                            var fragmentOffsets = ReadMemory<UiElementBaseOffset>(fragmentTabletsRoot);
+                            var fragmentKids = ReadStdVector<IntPtr>(fragmentOffsets.ChildrensPtr);
+                            if (fragmentKids.Length == 6)
+                            {
+                                ProcessFragmentTabletsTab(fragmentKids);
+                                processedAsFragmentTablets = true;
+                            }
+                        }
+
+                        if (!processedAsFragmentTablets)
+                        {
+                            // 3. Otherwise, check if it's a normal/quad stash tab: activeTabAddr -> 0 -> 0 has slots directly
+                            var normalGridRoot = ResolvePath(activeTabAddr, new int[] { 0, 0 });
+                            if (normalGridRoot != IntPtr.Zero)
+                            {
+                                ProcessNormalTab(normalGridRoot);
+                            }
                         }
                     }
                 }
@@ -917,6 +949,51 @@ namespace StashUtility
                             {
                                 EvaluateAndHighlightItem(item, pos, size);
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void ProcessFragmentTabletsTab(IntPtr[] pages)
+        {
+            foreach (var page in pages)
+            {
+                if (page == IntPtr.Zero) continue;
+
+                var pageOff = ReadMemory<UiElementBaseOffset>(page);
+                if (!UiElementBaseFuncs.IsVisibleChecker(pageOff.Flags)) continue;
+
+                // From page, go -> 0 -> 0 to get the slots container
+                var slotContainer = ResolvePath(page, new int[] { 0, 0 });
+                if (slotContainer == IntPtr.Zero) continue;
+
+                var containerOff = ReadMemory<UiElementBaseOffset>(slotContainer);
+                var slots = ReadStdVector<IntPtr>(containerOff.ChildrensPtr);
+
+                foreach (var slot in slots)
+                {
+                    if (slot == IntPtr.Zero) continue;
+
+                    var slotOff = ReadMemory<UiElementBaseOffset>(slot);
+                    if (!UiElementBaseFuncs.IsVisibleChecker(slotOff.Flags)) continue;
+
+                    // Retrieve screen bounds for slot
+                    var el = PluginUiElementReflection.CreateUiElement(slot, this.uiParentsObj);
+                    if (el == null) continue;
+
+                    var pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
+                    var size = (Vector2)PluginUiElementReflection.UiElementSizeProperty!.GetValue(el)!;
+                    if (size.X <= 0f || pos == Vector2.Zero) continue;
+
+                    // Scan slot for item entity
+                    var itemAddr = GetItemAddressFromElement(slot);
+                    if (itemAddr != IntPtr.Zero)
+                    {
+                        var item = ReadFreshItem(itemAddr);
+                        if (item != null)
+                        {
+                            EvaluateAndHighlightItem(item, pos, size);
                         }
                     }
                 }
