@@ -30,8 +30,8 @@ namespace StashUtility
         private readonly Dictionary<Type, MethodInfo> tryReadMemoryMethods = new();
 
         private readonly List<string> probeLog = new();
-        private List<string> waystoneModsDatabase = new();
-        private int selectedDatabaseModIndex = 0;
+        private string waystoneSearchTerm = string.Empty;
+        private string tabletSearchTerm = string.Empty;
 
         // Debug UI Path Explorer State
         private readonly List<int> currentDebugPath = new();
@@ -46,7 +46,6 @@ namespace StashUtility
         private Item lastHoveredWaystone = null;
         private bool freezeHoveredWaystone = false;
 
-        private string ModsDataPathname => Path.Combine(DllDirectory, "json", "mods_data.json");
         private string SettingPathname => Path.Combine(DllDirectory, "config", "settings.txt");
 
         public override void OnDisable()
@@ -74,21 +73,35 @@ namespace StashUtility
                 Settings.ScanEndOffset = 0x600;
             }
 
-            if (File.Exists(ModsDataPathname))
+            // Migration code: Convert old text patterns to new mod database IDs
+            if (Settings.BadModPatterns.Count > 0)
             {
-                try
+                for (int i = 0; i < Settings.BadModPatterns.Count; i++)
                 {
-                    var content = File.ReadAllText(ModsDataPathname);
-                    var modsData = JsonConvert.DeserializeObject<ModsData>(content);
-                    if (modsData != null)
+                    var pattern = Settings.BadModPatterns[i];
+                    var normalizedPat = NormalizeForMatching(pattern);
+                    var match = Data.ModDatabase.AllWaystoneMods.FirstOrDefault(dbMod => 
+                        NormalizeForMatching(dbMod.Name) == normalizedPat ||
+                        dbMod.Id.Equals(pattern, StringComparison.OrdinalIgnoreCase));
+                    if (match != null)
                     {
-                        waystoneModsDatabase = modsData.DatabaseMods ?? new List<string>();
-                        MapModTranslations = modsData.Translations ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        Settings.BadModPatterns[i] = match.Id;
                     }
                 }
-                catch (Exception ex)
+            }
+            if (Settings.GoodModPatterns.Count > 0)
+            {
+                for (int i = 0; i < Settings.GoodModPatterns.Count; i++)
                 {
-                    Console.WriteLine($"[StashUtility] Failed to load mods data: {ex}");
+                    var pattern = Settings.GoodModPatterns[i];
+                    var normalizedPat = NormalizeForMatching(pattern);
+                    var match = Data.ModDatabase.AllWaystoneMods.FirstOrDefault(dbMod => 
+                        NormalizeForMatching(dbMod.Name) == normalizedPat ||
+                        dbMod.Id.Equals(pattern, StringComparison.OrdinalIgnoreCase));
+                    if (match != null)
+                    {
+                        Settings.GoodModPatterns[i] = match.Id;
+                    }
                 }
             }
 
@@ -388,6 +401,19 @@ namespace StashUtility
                             }
                         }
 
+                        if (lastHoveredWaystone.TryGetComponent<Mods>(out var modsCompForDebug))
+                        {
+                            var allRawMods = modsCompForDebug.ImplicitMods.Concat(modsCompForDebug.ExplicitMods).Concat(modsCompForDebug.EnchantMods).ToList();
+                            if (allRawMods.Count > 0 && ImGui.TreeNode("Raw Game Memory Mods (For Matching)"))
+                            {
+                                foreach (var mod in allRawMods)
+                                {
+                                    ImGui.Text($"Raw ID: {mod.name}");
+                                }
+                                ImGui.TreePop();
+                            }
+                        }
+
                         ImGui.SeparatorText("Advanced");
                         if (ImGui.Button("Dump Full Memory To File"))
                         {
@@ -418,11 +444,12 @@ namespace StashUtility
             }
 
             ImGui.Checkbox("Enable Waystone Manager", ref Settings.EnableWaystoneManager);
-            ImGuiHelper.ToolTip("Enables or disables highlighting of waystones in the waystone stash tab.");
+            ImGuiHelper.ToolTip("Enables or disables highlighting of waystones.");
 
             if (Settings.EnableWaystoneManager)
             {
-                if (ImGui.CollapsingHeader("Filter Criteria"))
+                ImGui.Indent();
+                if (ImGui.CollapsingHeader("Waystone Highlight Criteria (Normal)"))
                 {
                     ImGui.SliderInt("Min Tier", ref Settings.MinTier, 1, 16);
                     ImGuiHelper.ToolTip("Minimum Waystone Tier to highlight (Normal rarity is always ignored if Hide Normal Waystones is checked).");
@@ -482,70 +509,203 @@ namespace StashUtility
                     }
                 }
 
-                if (ImGui.CollapsingHeader("Mod Filter"))
+                if (ImGui.CollapsingHeader("Waystone Mod Filter Manager"))
                 {
-                    ImGui.SeparatorText("Add Mod from Database");
-                    if (waystoneModsDatabase.Count > 0)
+                    ImGui.Checkbox("Only Filter Bad Mods on Criteria-Meeting Waystones", ref Settings.FilterBadModsOnlyOnHighlighted);
+                    ImGuiHelper.ToolTip("When checked, bad mod filtering is only applied to waystones that already meet the Tier and other active numerical criteria.");
+
+                    if (ImGui.BeginCombo("Add Waystone Mod", "Select from database..."))
                     {
-                        string preview = selectedDatabaseModIndex >= 0 && selectedDatabaseModIndex < waystoneModsDatabase.Count 
-                            ? waystoneModsDatabase[selectedDatabaseModIndex] 
-                            : "Select a modifier...";
+                        ImGui.InputTextWithHint("##searchWaystone", "Search database...", ref waystoneSearchTerm, 64);
+                        var filtered = Data.ModDatabase.AllWaystoneMods
+                            .Where(m => m.Name.Contains(waystoneSearchTerm, StringComparison.OrdinalIgnoreCase) ||
+                                        m.Id.Contains(waystoneSearchTerm, StringComparison.OrdinalIgnoreCase))
+                            .ToList();
 
-                        if (ImGui.BeginCombo("Waystone Mods Database", preview))
+                        foreach (var mod in filtered)
                         {
-                            for (int i = 0; i < waystoneModsDatabase.Count; i++)
+                            if (ImGui.Selectable($"{mod.Name}##{mod.Id}"))
                             {
-                                bool isSelected = (i == selectedDatabaseModIndex);
-                                if (ImGui.Selectable(waystoneModsDatabase[i], isSelected))
+                                if (!Settings.BadModPatterns.Contains(mod.Id) && !Settings.GoodModPatterns.Contains(mod.Id))
                                 {
-                                    selectedDatabaseModIndex = i;
-                                }
-                                if (isSelected)
-                                {
-                                    ImGui.SetItemDefaultFocus();
-                                }
-                            }
-                            ImGui.EndCombo();
-                        }
-
-                        if (ImGui.Button("Add to Bad Mods"))
-                        {
-                            if (selectedDatabaseModIndex >= 0 && selectedDatabaseModIndex < waystoneModsDatabase.Count)
-                            {
-                                var modText = waystoneModsDatabase[selectedDatabaseModIndex];
-                                if (!Settings.BadModPatterns.Contains(modText))
-                                {
-                                    Settings.BadModPatterns.Add(modText);
+                                    Settings.BadModPatterns.Add(mod.Id);
+                                    SaveSettings();
                                 }
                             }
                         }
-                    }
-                    else
-                    {
-                        ImGui.TextColored(new Vector4(1, 1, 0, 1), "Database not loaded. Verify json/mods_data.json exists.");
+                        ImGui.EndCombo();
                     }
 
-                    ImGui.SeparatorText("Bad Mod Substrings");
-                    DrawStringList(Settings.BadModPatterns);
+                    DrawModListUI("BAD WAYSTONE MODS (RED HIGHLIGHT)", Settings.BadModPatterns, Settings.GoodModPatterns, new Vector4(1f, 0.4f, 0.4f, 1f), true);
+                    DrawModListUI("GOOD WAYSTONE MODS (GREEN HIGHLIGHT)", Settings.GoodModPatterns, Settings.BadModPatterns, new Vector4(0.4f, 1f, 0.4f, 1f), false);
                 }
 
-                if (ImGui.CollapsingHeader("Visual Settings"))
+                if (ImGui.CollapsingHeader("Waystone GREAT Highlight Conditions"))
                 {
-                    ImGui.Checkbox("Show Mod Highlight Border", ref Settings.ShowModBorder);
-                    ImGui.Checkbox("Show Rarity Corner Indicator", ref Settings.ShowRarityBorder);
-                    if (Settings.ShowRarityBorder)
+                    ImGui.Checkbox("Filter Great Item Rarity", ref Settings.FilterGreatRarity);
+                    if (Settings.FilterGreatRarity)
                     {
                         ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
                         ImGui.SetNextItemWidth(150f);
-                        ImGui.SliderFloat("Indicator Size##size", ref Settings.RarityIndicatorSize, 5f, 30f);
+                        ImGui.SliderInt("Min Great Rarity (%)", ref Settings.MinGreatRarity, 0, 200);
                     }
-                    ImGui.Checkbox("Hide Normal (White) Waystones", ref Settings.HideNormalWaystones);
-                    ImGui.SliderFloat("Border Thickness", ref Settings.BorderThickness, 1f, 10f);
 
-                    ImGui.SeparatorText("Colors");
-                    ImGui.ColorEdit4("Good Mod Color", ref Settings.GoodColor);
-                    ImGui.ColorEdit4("Bad Mod Color", ref Settings.BadColor);
+                    ImGui.Checkbox("Filter Great Pack Size", ref Settings.FilterGreatPackSize);
+                    if (Settings.FilterGreatPackSize)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt("Min Great Pack Size (%)", ref Settings.MinGreatPackSize, 0, 100);
+                    }
+
+                    ImGui.Checkbox("Filter Great Monster Rarity", ref Settings.FilterGreatMonstRarity);
+                    if (Settings.FilterGreatMonstRarity)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt("Min Great Monster Rarity (%)", ref Settings.MinGreatMonstRarity, 0, 100);
+                    }
+
+                    ImGui.Checkbox("Filter Great Monster Effectiveness", ref Settings.FilterGreatEffect);
+                    if (Settings.FilterGreatEffect)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt("Min Great Effectiveness (%)", ref Settings.MinGreatEffect, 0, 100);
+                    }
+
+                    ImGui.Checkbox("Filter Great Waystone Drop Chance", ref Settings.FilterGreatDropChance);
+                    if (Settings.FilterGreatDropChance)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt("Min Great Drop Chance (%)", ref Settings.MinGreatDropChance, 0, 300);
+                    }
                 }
+                ImGui.Unindent();
+            }
+
+            ImGui.Checkbox("Enable Tablet Manager", ref Settings.EnableTabletManager);
+            ImGuiHelper.ToolTip("Enables or disables highlighting of precursor/breach tablets.");
+
+            if (Settings.EnableTabletManager)
+            {
+                ImGui.Indent();
+                if (ImGui.CollapsingHeader("Tablet Mod Filter Manager"))
+                {
+                    if (ImGui.BeginTabBar("TabletMechanicsTabs"))
+                    {
+                        var categories = new Dictionary<string, Func<Models.TabletMod, bool>>
+                        {
+                            { "Breach", m => m.Id.Contains("Breach", StringComparison.OrdinalIgnoreCase) },
+                            { "Expedition", m => m.Id.Contains("Expedition", StringComparison.OrdinalIgnoreCase) },
+                            { "Delirium", m => m.Id.Contains("Delirium", StringComparison.OrdinalIgnoreCase) },
+                            { "Abyss", m => m.Id.Contains("Abyss", StringComparison.OrdinalIgnoreCase) },
+                            { "Incursion", m => m.Id.Contains("Incursion", StringComparison.OrdinalIgnoreCase) },
+                            { "Ritual", m => m.Id.Contains("Ritual", StringComparison.OrdinalIgnoreCase) },
+                            { "General", m => !m.Id.Contains("Breach", StringComparison.OrdinalIgnoreCase) && !m.Id.Contains("Expedition", StringComparison.OrdinalIgnoreCase) && !m.Id.Contains("Delirium", StringComparison.OrdinalIgnoreCase) && !m.Id.Contains("Abyss", StringComparison.OrdinalIgnoreCase) && !m.Id.Contains("Incursion", StringComparison.OrdinalIgnoreCase) && !m.Id.Contains("Ritual", StringComparison.OrdinalIgnoreCase) }
+                        };
+
+                        foreach (var kvp in categories)
+                        {
+                            if (ImGui.BeginTabItem(kvp.Key))
+                            {
+                                var tabMods = Data.ModDatabase.AllTabletMods.Where(kvp.Value).ToList();
+                                
+                                ImGui.InputTextWithHint($"##search{kvp.Key}", $"Search {kvp.Key} Mods...", ref tabletSearchTerm, 64);
+                                var filtered = tabMods.Where(m => m.Name.Contains(tabletSearchTerm, StringComparison.OrdinalIgnoreCase) || m.Id.Contains(tabletSearchTerm, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                                if (ImGui.BeginChild($"Child{kvp.Key}", new Vector2(0, 250), ImGuiChildFlags.Borders))
+                                {
+                                    foreach (var mod in filtered)
+                                    {
+                                        bool isGood = Settings.TabletGoodModPatterns.Contains(mod.Id);
+                                        bool isBad = Settings.TabletBadModPatterns.Contains(mod.Id);
+                                        bool isGod = Settings.TabletGodModPatterns.Contains(mod.Id);
+
+                                        ImGui.TextWrapped(mod.Name.Replace("%", "%%"));
+
+                                        if (ImGui.Checkbox($"Good##g_{mod.Id}", ref isGood))
+                                        {
+                                            if (isGood) { Settings.TabletGoodModPatterns.Add(mod.Id); Settings.TabletBadModPatterns.Remove(mod.Id); Settings.TabletGodModPatterns.Remove(mod.Id); }
+                                            else { Settings.TabletGoodModPatterns.Remove(mod.Id); }
+                                            SaveSettings();
+                                        }
+                                        ImGui.SameLine(100f);
+                                        if (ImGui.Checkbox($"Bad##b_{mod.Id}", ref isBad))
+                                        {
+                                            if (isBad) { Settings.TabletBadModPatterns.Add(mod.Id); Settings.TabletGoodModPatterns.Remove(mod.Id); Settings.TabletGodModPatterns.Remove(mod.Id); }
+                                            else { Settings.TabletBadModPatterns.Remove(mod.Id); }
+                                            SaveSettings();
+                                        }
+                                        ImGui.SameLine(190f);
+                                        if (ImGui.Checkbox($"God##god_{mod.Id}", ref isGod))
+                                        {
+                                            if (isGod) { Settings.TabletGodModPatterns.Add(mod.Id); Settings.TabletGoodModPatterns.Remove(mod.Id); Settings.TabletBadModPatterns.Remove(mod.Id); }
+                                            else { Settings.TabletGodModPatterns.Remove(mod.Id); }
+                                            SaveSettings();
+                                        }
+                                        ImGui.Separator();
+                                    }
+                                    ImGui.EndChild();
+                                }
+                                ImGui.EndTabItem();
+                            }
+                        }
+                        ImGui.EndTabBar();
+                    }
+                }
+
+                if (ImGui.CollapsingHeader("Tablet GREAT Highlight Conditions"))
+                {
+                    ImGui.Checkbox("Filter Tablet Great Status", ref Settings.FilterTabletGreat);
+                    if (Settings.FilterTabletGreat)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt("Min Good Tablet Mods Count", ref Settings.MinTabletGoodMods, 1, 5);
+                    }
+                    ImGui.SetNextItemWidth(150f);
+                    ImGui.SliderInt("Min Good Mods To Ignore Bad", ref Settings.MinGoodModsToIgnoreBad, 1, 6);
+                    ImGuiHelper.ToolTip("If a tablet has this many good mods, it will ignore any bad mods and still be highlighted as Good/Great.");
+                }
+                ImGui.Unindent();
+            }
+
+            if (ImGui.CollapsingHeader("Overlay Visual Settings"))
+            {
+                ImGui.Checkbox("Show Mod Highlight Border", ref Settings.ShowModBorder);
+                ImGui.Checkbox("Show Rarity Corner Indicator", ref Settings.ShowRarityBorder);
+                if (Settings.ShowRarityBorder)
+                {
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(150f);
+                    ImGui.SliderFloat("Indicator Size##size", ref Settings.RarityIndicatorSize, 5f, 30f);
+                }
+                ImGui.Checkbox("Hide Normal (White) Waystones", ref Settings.HideNormalWaystones);
+                ImGui.SliderFloat("Border Thickness", ref Settings.BorderThickness, 1f, 10f);
+
+                string[] borderStyles = { "Solid", "Dashed", "Dotted" };
+                ImGui.Combo("Bad Highlight Border Style", ref Settings.FrameStyleBad, borderStyles, borderStyles.Length);
+                ImGui.Combo("Good Highlight Border Style", ref Settings.FrameStyleGood, borderStyles, borderStyles.Length);
+
+                string[] arrowPositions = { "Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right" };
+                ImGui.Combo("GREAT Arrow Position", ref Settings.GreatIndicatorPosition, arrowPositions, arrowPositions.Length);
+                ImGui.SliderFloat("GREAT Arrow Size", ref Settings.GreatIndicatorSize, 5f, 40f);
+
+                ImGui.SeparatorText("Colors");
+                ImGui.ColorEdit4("Good Highlight Color", ref Settings.GoodColor);
+                ImGui.ColorEdit4("Bad Highlight Color", ref Settings.BadColor);
+                ImGui.ColorEdit4("GREAT Arrow Color", ref Settings.ColorGreat);
+                ImGui.ColorEdit4("Rare Rarity Color", ref Settings.RareRarityColor);
+                ImGui.ColorEdit4("Magic Rarity Color", ref Settings.MagicRarityColor);
+                ImGui.ColorEdit4("Normal Rarity Color", ref Settings.NormalRarityColor);
             }
         }
 
@@ -595,7 +755,7 @@ namespace StashUtility
 
         public override void DrawUI()
         {
-            if (!Settings.EnableWaystoneManager && !Settings.EnableDebugProbe) return;
+            if (!Settings.EnableWaystoneManager && !Settings.EnableTabletManager && !Settings.EnableDebugProbe) return;
 
             if (!Settings.ShowOverlayInBackground && !Core.Process.Foreground)
             {
@@ -616,7 +776,7 @@ namespace StashUtility
                 DrawDebugOverlay();
             }
 
-            if (!Settings.EnableWaystoneManager) return;
+            if (!Settings.EnableWaystoneManager && !Settings.EnableTabletManager) return;
 
             // Resolve Path
             int[] pathIndices;
@@ -857,7 +1017,15 @@ namespace StashUtility
             if (!item.TryGetComponent<Base>(out var baseComponent)) return;
 
             var name = baseComponent.BaseItemName;
-            if (string.IsNullOrEmpty(name) || !name.Contains("Waystone")) return;
+            var path = item.Path;
+
+            bool isWaystone = (!string.IsNullOrEmpty(name) && name.Contains("Waystone")) || path.Contains("MapKey") || path.Contains("Waystone");
+            bool isTablet = (!string.IsNullOrEmpty(name) && name.Contains("Tablet")) || path.Contains("TowerAugment") || path.Contains("Tablet");
+
+            if (!isWaystone && !isTablet) return;
+
+            if (isWaystone && !Settings.EnableWaystoneManager) return;
+            if (isTablet && !Settings.EnableTabletManager) return;
 
             if (Settings.EnableDebugProbe && !freezeHoveredWaystone)
             {
@@ -869,56 +1037,52 @@ namespace StashUtility
                 }
             }
 
-            var tierMatch = System.Text.RegularExpressions.Regex.Match(name, @"Tier\s*(\d+)");
-            int tier = 0;
-            if (tierMatch.Success && int.TryParse(tierMatch.Groups[1].Value, out var parsedTier))
-            {
-                tier = parsedTier;
-            }
-            else
-            {
-                var pathMatch = System.Text.RegularExpressions.Regex.Match(item.Path, @"Waystone(\d+)");
-                if (pathMatch.Success) int.TryParse(pathMatch.Groups[1].Value, out tier);
-            }
-
-            if (tier < Settings.MinTier) return;
-
             var rarity = GameHelper.RemoteEnums.Rarity.Normal;
             if (item.TryGetComponent<Mods>(out var modsComponent))
             {
                 rarity = modsComponent.Rarity;
             }
 
-            if (Settings.HideNormalWaystones && rarity == GameHelper.RemoteEnums.Rarity.Normal) return;
+            if (isWaystone && Settings.HideNormalWaystones && rarity == GameHelper.RemoteEnums.Rarity.Normal) return;
 
-            var modLines = GetWaystoneModLines(item);
-
-            int revives = 0;
-            int rarityBonus = 0;
-            int packSize = 0;
-            int monsterRarity = 0;
-            int monsterEffectiveness = 0;
-            int dropChance = 0;
-
-            if (item.TryGetComponent<Mods>(out var modsComp))
+            int tier = 0;
+            if (isWaystone)
             {
-                var statsFromMods = GetStatsFromMods(modsComp);
-                if (statsFromMods.TryGetValue((GameStats)8210, out var rawDropChance))
+                var tierMatch = System.Text.RegularExpressions.Regex.Match(name, @"Tier\s*(\d+)");
+                if (tierMatch.Success && int.TryParse(tierMatch.Groups[1].Value, out var parsedTier))
                 {
-                    dropChance = rawDropChance;
+                    tier = parsedTier;
                 }
-                if (statsFromMods.TryGetValue((GameStats)8206, out var rawRarity))
+                else
                 {
-                    rarityBonus = rawRarity;
+                    var pathMatch = System.Text.RegularExpressions.Regex.Match(path, @"Waystone(\d+)");
+                    if (pathMatch.Success) int.TryParse(pathMatch.Groups[1].Value, out tier);
                 }
-                if (statsFromMods.TryGetValue((GameStats)8208, out var rawMonsterRarity))
-                {
-                    monsterRarity = rawMonsterRarity;
-                }
-                if (statsFromMods.TryGetValue((GameStats)8209, out var rawMonsterEffectiveness))
-                {
-                    monsterEffectiveness = rawMonsterEffectiveness;
-                }
+
+                if (tier < Settings.MinTier) return;
+            }
+
+            bool isBad = false;
+            bool isGood = false;
+            bool isGreat = false;
+            bool isGod = false;
+
+            int sumRarity = 0;
+            int sumPackSize = 0;
+            int sumMonstRarity = 0;
+            int sumEffect = 0;
+            int sumDropChance = 0;
+            int revives = 0;
+
+            int tabletGoodCount = 0;
+
+            if (modsComponent != null)
+            {
+                var statsFromMods = GetStatsFromMods(modsComponent);
+                if (statsFromMods.TryGetValue((GameStats)8210, out var rawDropChance)) sumDropChance = rawDropChance;
+                if (statsFromMods.TryGetValue((GameStats)8206, out var rawRarity)) sumRarity = rawRarity;
+                if (statsFromMods.TryGetValue((GameStats)8208, out var rawMonsterRarity)) sumMonstRarity = rawMonsterRarity;
+                if (statsFromMods.TryGetValue((GameStats)8209, out var rawMonsterEffectiveness)) sumEffect = rawMonsterEffectiveness;
 
                 int quality = 0;
                 var field = typeof(Entity).GetField("componentAddresses", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -930,139 +1094,241 @@ namespace StashUtility
                         TryReadMemory<int>(qualityAddr + 0x18, out quality);
                     }
                 }
-                dropChance += quality;
+                sumDropChance += quality;
 
                 var allRawMods = new List<(string name, (float v0, float v1) vals)>();
-                allRawMods.AddRange(modsComp.ImplicitMods);
-                allRawMods.AddRange(modsComp.ExplicitMods);
-                allRawMods.AddRange(modsComp.EnchantMods);
+                allRawMods.AddRange(modsComponent.ImplicitMods);
+                allRawMods.AddRange(modsComponent.ExplicitMods);
+                allRawMods.AddRange(modsComponent.EnchantMods);
 
                 foreach (var mod in allRawMods)
                 {
                     if (string.IsNullOrEmpty(mod.name)) continue;
-                    var lowerName = mod.name.ToLowerInvariant();
+
+                    string lowerName = mod.name.ToLowerInvariant();
                     float rawVal = float.IsNaN(mod.vals.v0) ? 0f : mod.vals.v0;
-                    if (rawVal == 0f)
-                    {
-                        rawVal = float.IsNaN(mod.vals.v1) ? 0f : mod.vals.v1;
-                    }
+                    if (rawVal == 0f) rawVal = float.IsNaN(mod.vals.v1) ? 0f : mod.vals.v1;
                     int intVal = (int)rawVal;
 
                     if (lowerName.Contains("revive"))
                     {
                         revives = intVal;
                     }
-                    else if (rarityBonus == 0 && (lowerName.Contains("itemrarity") || lowerName.Contains("item_rarity") || (lowerName.Contains("rarity") && lowerName.Contains("item"))))
+                    else if (sumPackSize == 0 && (lowerName.Contains("packsize") || lowerName.Contains("pack_size") || lowerName.Contains("pack")))
                     {
-                        rarityBonus = intVal;
+                        sumPackSize = intVal;
                     }
-                    else if (packSize == 0 && (lowerName.Contains("packsize") || lowerName.Contains("pack_size") || lowerName.Contains("pack")))
-                    {
-                        packSize = intVal;
-                    }
-                    else if (monsterRarity == 0 && (lowerName.Contains("monsterrarity") || lowerName.Contains("monster_rarity") || (lowerName.Contains("rarity") && lowerName.Contains("monster"))))
-                    {
-                        monsterRarity = intVal;
-                    }
-                    else if (monsterEffectiveness == 0 && (lowerName.Contains("effectiveness") || lowerName.Contains("monstereffectiveness") || lowerName.Contains("monster_effectiveness")))
-                    {
-                        monsterEffectiveness = intVal;
-                    }
-                    else if (dropChance == 0 && (lowerName.Contains("dropchance") || lowerName.Contains("drop_chance") || lowerName.Contains("waystonedrop") || lowerName.Contains("waystone_drop")))
-                    {
-                        dropChance = intVal;
-                    }
-                }
-            }
 
-            foreach (var line in modLines)
-            {
-                var lowerLine = line.ToLowerInvariant();
-                if (revives == 0 && (lowerLine.Contains("revives available") || lowerLine.Contains("revive")))
-                {
-                    revives = ExtractFirstNumber(line);
+                    if (isWaystone)
+                    {
+                        var def = Data.ModDatabase.AllWaystoneMods
+                            .OrderByDescending(d => d.Id.Length)
+                            .FirstOrDefault(d => mod.name.Contains(d.Id, StringComparison.OrdinalIgnoreCase));
+
+                        if (def != null)
+                        {
+                            if (sumRarity == 0) sumRarity += def.ItemRarity;
+                            if (sumPackSize == 0) sumPackSize += def.PackSize;
+                            if (sumMonstRarity == 0) sumMonstRarity += def.MonsterRarity;
+                            if (sumEffect == 0) sumEffect += def.MonsterEffectiveness;
+                            if (sumDropChance == 0) sumDropChance += def.WaystoneDropChance;
+
+                            if (Settings.BadModPatterns.Contains(def.Id))
+                            {
+                                isBad = true;
+                            }
+                            if (Settings.GoodModPatterns.Contains(def.Id))
+                            {
+                                isGood = true;
+                            }
+                        }
+                    }
+                    else if (isTablet)
+                    {
+                        var def = Data.ModDatabase.AllTabletMods
+                            .OrderByDescending(d => d.Id.Length)
+                            .FirstOrDefault(d => mod.name.Contains(d.Id, StringComparison.OrdinalIgnoreCase));
+
+                        if (def != null)
+                        {
+                            if (Settings.TabletGodModPatterns.Contains(def.Id))
+                            {
+                                isGod = true;
+                            }
+                            if (Settings.TabletBadModPatterns.Contains(def.Id))
+                            {
+                                isBad = true;
+                            }
+                            if (Settings.TabletGoodModPatterns.Contains(def.Id))
+                            {
+                                isGood = true;
+                                tabletGoodCount++;
+                            }
+                        }
+                    }
                 }
-                else if (rarityBonus == 0 && (lowerLine.Contains("item rarity") || (lowerLine.Contains("rarity") && lowerLine.Contains("item"))))
+
+                if (isWaystone)
                 {
-                    rarityBonus = ExtractFirstNumber(line);
+                    bool candidate = true;
+                    int activeFilters = 0;
+
+                    if (Settings.FilterGreatRarity) { activeFilters++; if (sumRarity < Settings.MinGreatRarity) candidate = false; }
+                    if (Settings.FilterGreatPackSize) { activeFilters++; if (sumPackSize < Settings.MinGreatPackSize) candidate = false; }
+                    if (Settings.FilterGreatMonstRarity) { activeFilters++; if (sumMonstRarity < Settings.MinGreatMonstRarity) candidate = false; }
+                    if (Settings.FilterGreatEffect) { activeFilters++; if (sumEffect < Settings.MinGreatEffect) candidate = false; }
+                    if (Settings.FilterGreatDropChance) { activeFilters++; if (sumDropChance < Settings.MinGreatDropChance) candidate = false; }
+
+                    isGreat = activeFilters > 0 && candidate;
                 }
-                else if (packSize == 0 && lowerLine.Contains("pack size"))
+                else if (isTablet)
                 {
-                    packSize = ExtractFirstNumber(line);
-                }
-                else if (monsterRarity == 0 && (lowerLine.Contains("rare monster") || lowerLine.Contains("monster rarity")))
-                {
-                    monsterRarity = ExtractFirstNumber(line);
-                }
-                else if (monsterEffectiveness == 0 && (lowerLine.Contains("effectiveness") || lowerLine.Contains("monster effectiveness")))
-                {
-                    monsterEffectiveness = ExtractFirstNumber(line);
-                }
-                else if (dropChance == 0 && (lowerLine.Contains("waystone drop") || lowerLine.Contains("waystones found")))
-                {
-                    dropChance = ExtractFirstNumber(line);
+                    if (isGod || tabletGoodCount >= Settings.MinGoodModsToIgnoreBad)
+                    {
+                        isBad = false;
+                        isGood = true;
+                    }
+
+                    if (Settings.FilterTabletGreat)
+                    {
+                        isGreat = isGod || tabletGoodCount >= Settings.MinTabletGoodMods;
+                    }
                 }
             }
 
             bool passesNumericalFilters = true;
-            if (Settings.FilterMaxRevives && revives > Settings.MaxRevivesAvailable) passesNumericalFilters = false;
-            if (Settings.FilterMinItemRarity && rarityBonus < Settings.MinItemRarity) passesNumericalFilters = false;
-            if (Settings.FilterMinPackSize && packSize < Settings.MinPackSize) passesNumericalFilters = false;
-            if (Settings.FilterMinMonsterRarity && monsterRarity < Settings.MinMonsterRarity) passesNumericalFilters = false;
-            if (Settings.FilterMinMonsterEffectiveness && monsterEffectiveness < Settings.MinMonsterEffectiveness) passesNumericalFilters = false;
-            if (Settings.FilterMinWaystoneDropChance && dropChance < Settings.MinWaystoneDropChance) passesNumericalFilters = false;
-            if (!passesNumericalFilters) return;
-
-            int badModCount = 0;
-
-            foreach (var line in modLines)
+            if (isWaystone)
             {
-                var normalizedLine = NormalizeForMatching(line);
-                if (string.IsNullOrEmpty(normalizedLine)) continue;
-
-                foreach (var pattern in Settings.BadModPatterns)
-                {
-                    if (string.IsNullOrEmpty(pattern)) continue;
-                    var normalizedPattern = NormalizeForMatching(pattern);
-                    if (!string.IsNullOrEmpty(normalizedPattern) && normalizedLine.Contains(normalizedPattern, StringComparison.OrdinalIgnoreCase))
-                    {
-                        badModCount++;
-                    }
-                }
+                if (Settings.FilterMaxRevives && revives > Settings.MaxRevivesAvailable) passesNumericalFilters = false;
+                if (Settings.FilterMinItemRarity && sumRarity < Settings.MinItemRarity) passesNumericalFilters = false;
+                if (Settings.FilterMinPackSize && sumPackSize < Settings.MinPackSize) passesNumericalFilters = false;
+                if (Settings.FilterMinMonsterRarity && sumMonstRarity < Settings.MinMonsterRarity) passesNumericalFilters = false;
+                if (Settings.FilterMinMonsterEffectiveness && sumEffect < Settings.MinMonsterEffectiveness) passesNumericalFilters = false;
+                if (Settings.FilterMinWaystoneDropChance && sumDropChance < Settings.MinWaystoneDropChance) passesNumericalFilters = false;
             }
 
-            bool isBad = badModCount > 0;
+            if (isTablet && !isBad && !isGood) return;
 
-            if (Settings.ShowModBorder)
+            if (isWaystone && Settings.FilterBadModsOnlyOnHighlighted && !passesNumericalFilters) return;
+
+            if (!isBad && !passesNumericalFilters) return;
+
+            if (Settings.ShowModBorder && (isBad || isGood || passesNumericalFilters))
             {
                 Vector4 borderCol = isBad ? Settings.BadColor : Settings.GoodColor;
+                float thickness = isBad ? Settings.BorderThickness : Math.Max(1.5f, Settings.BorderThickness - 0.5f);
+                int style = isBad ? Settings.FrameStyleBad : Settings.FrameStyleGood;
 
-                ImGui.GetBackgroundDrawList().AddRect(
-                    pos + new Vector2(1, 1),
-                    pos + size - new Vector2(1, 1),
-                    ImGuiHelper.Color(borderCol),
-                    3f,
-                    ImDrawFlags.RoundCornersAll,
-                    Settings.BorderThickness
-                );
+                AddStyledRect(ImGui.GetBackgroundDrawList(), pos + new Vector2(1, 1), pos + size - new Vector2(1, 1), ImGuiHelper.Color(borderCol), thickness, style);
             }
 
-            if (Settings.ShowRarityBorder)
+            if ((isWaystone || isTablet) && Settings.ShowRarityBorder)
             {
                 Vector4 rarityCol = rarity switch
                 {
-                    GameHelper.RemoteEnums.Rarity.Normal => new Vector4(0.8f, 0.8f, 0.8f, 1f),
-                    GameHelper.RemoteEnums.Rarity.Magic => new Vector4(0.4f, 0.6f, 1f, 1f),
-                    GameHelper.RemoteEnums.Rarity.Rare => new Vector4(1f, 0.85f, 0f, 1f),
+                    GameHelper.RemoteEnums.Rarity.Normal => Settings.NormalRarityColor,
+                    GameHelper.RemoteEnums.Rarity.Magic => Settings.MagicRarityColor,
+                    GameHelper.RemoteEnums.Rarity.Rare => Settings.RareRarityColor,
                     GameHelper.RemoteEnums.Rarity.Unique => new Vector4(1f, 0.5f, 0f, 1f),
-                    _ => new Vector4(0.8f, 0.8f, 0.8f, 1f)
+                    _ => Settings.NormalRarityColor
                 };
 
+                float offset = 1f + (Settings.ShowModBorder ? Settings.BorderThickness : 0f);
                 float sizeVal = Settings.RarityIndicatorSize;
-                var p0 = pos + new Vector2(size.X - sizeVal, 0f);
-                var p1 = pos + new Vector2(size.X, 0f);
-                var p2 = pos + new Vector2(size.X, sizeVal);
+                var p0 = pos + new Vector2(size.X - offset - sizeVal, offset);
+                var p1 = pos + new Vector2(size.X - offset, offset);
+                var p2 = pos + new Vector2(size.X - offset, offset + sizeVal);
                 ImGui.GetBackgroundDrawList().AddTriangleFilled(p0, p1, p2, ImGuiHelper.Color(rarityCol));
+            }
+
+            if (isGreat)
+            {
+                float scale = size.X / 52.0f;
+                float arrowSize = Settings.GreatIndicatorSize * scale;
+                float padding = 4f * scale;
+
+                Vector2 topTip = Settings.GreatIndicatorPosition switch
+                {
+                    0 => pos + new Vector2(padding + (arrowSize / 2), padding), // Top-Left
+                    1 => pos + new Vector2(size.X - padding - (arrowSize / 2), padding + (Settings.ShowRarityBorder ? Settings.RarityIndicatorSize : 0f)), // Top-Right
+                    2 => pos + new Vector2(padding + (arrowSize / 2), size.Y - padding - arrowSize), // Bottom-Left
+                    3 => pos + new Vector2(size.X - padding - (arrowSize / 2), size.Y - padding - arrowSize), // Bottom-Right
+                    _ => pos + new Vector2(padding + (arrowSize / 2), padding)
+                };
+
+                var dl = ImGui.GetBackgroundDrawList();
+                dl.AddTriangleFilled(topTip, topTip + new Vector2(-arrowSize / 2, arrowSize), topTip + new Vector2(arrowSize / 2, arrowSize), ImGuiHelper.Color(Settings.ColorGreat));
+                dl.AddTriangle(topTip, topTip + new Vector2(-arrowSize / 2, arrowSize), topTip + new Vector2(arrowSize / 2, arrowSize), 0xFF000000, Math.Max(1.0f, 1.5f * scale));
+            }
+        }
+
+        private void AddStyledRect(ImDrawListPtr dl, Vector2 min, Vector2 max, uint color, float thickness, int style)
+        {
+            if (style == 0)
+            {
+                dl.AddRect(min, max, color, 3.0f, ImDrawFlags.RoundCornersAll, thickness);
+                return;
+            }
+
+            float step = (style == 1) ? 10.0f : 4.0f;
+            float space = (style == 1) ? 5.0f : 4.0f;
+
+            DrawDashedLine(dl, new Vector2(min.X, min.Y), new Vector2(max.X, min.Y), color, thickness, step, space);
+            DrawDashedLine(dl, new Vector2(max.X, min.Y), new Vector2(max.X, max.Y), color, thickness, step, space);
+            DrawDashedLine(dl, new Vector2(max.X, max.Y), new Vector2(min.X, max.Y), color, thickness, step, space);
+            DrawDashedLine(dl, new Vector2(min.X, max.Y), new Vector2(min.X, min.Y), color, thickness, step, space);
+        }
+
+        private void DrawDashedLine(ImDrawListPtr dl, Vector2 start, Vector2 end, uint color, float thickness, float step, float space)
+        {
+            Vector2 diff = end - start;
+            float fullLen = diff.Length();
+            if (fullLen <= 0) return;
+            Vector2 dir = diff / fullLen;
+
+            float currentLen = 0;
+            while (currentLen < fullLen)
+            {
+                float lineLen = Math.Min(step, fullLen - currentLen);
+                dl.AddLine(start + dir * currentLen, start + dir * (currentLen + lineLen), color, thickness);
+                currentLen += lineLen + space;
+            }
+        }
+
+        private void DrawModListUI(string title, List<string> currentList, List<string> targetList, Vector4 color, bool isCurrentlyBad)
+        {
+            ImGui.TextColored(color, title);
+            if (currentList.Count == 0) ImGui.TextDisabled("   (List empty)");
+
+            for (int i = 0; i < currentList.Count; i++)
+            {
+                string id = currentList[i];
+                var defW = Data.ModDatabase.AllWaystoneMods.FirstOrDefault(m => m.Id == id);
+                var defT = Data.ModDatabase.AllTabletMods.FirstOrDefault(m => m.Id == id);
+                string name = defW?.Name ?? defT?.Name ?? id;
+
+                ImGui.PushID(title + id);
+                if (ImGui.Button("X"))
+                {
+                    currentList.RemoveAt(i);
+                    SaveSettings();
+                    ImGui.PopID();
+                    break;
+                }
+                ImGui.SameLine();
+                ImGui.TextUnformatted(name);
+                ImGui.SameLine();
+
+                string moveLabel = isCurrentlyBad ? "Set GOOD" : "Set BAD";
+                if (ImGui.SmallButton(moveLabel))
+                {
+                    targetList.Add(id);
+                    currentList.RemoveAt(i);
+                    SaveSettings();
+                    ImGui.PopID();
+                    break;
+                }
+                ImGui.PopID();
             }
         }
 
