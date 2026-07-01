@@ -1335,9 +1335,10 @@ namespace StashUtility
             if (isGreat)
             {
                 float arrowSize = Settings.GreatIndicatorSize * scale;
+                float padding = 4.0f * scale;
                 float borderPad = activeBorderThickness > 0 ? activeBorderThickness : 0f;
-                float totalPadX = margin + borderPad;
-                float totalPadY = margin + borderPad;
+                float totalPadX = margin + borderPad + padding;
+                float totalPadY = margin + borderPad + padding;
 
                 Vector2 topTip = Settings.GreatIndicatorPosition switch
                 {
