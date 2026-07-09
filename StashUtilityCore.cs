@@ -677,8 +677,8 @@ namespace StashUtility
                                         }
                                         ImGui.Separator();
                                     }
-                                    ImGui.EndChild();
                                 }
+                                ImGui.EndChild();
                                 ImGui.EndTabItem();
                             }
                         }
