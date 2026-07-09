@@ -72,15 +72,19 @@ namespace StashUtility
         // GREAT Conditions (Tablets)
         public bool FilterTabletGreat = false;
         public int MinTabletGoodMods = 2;
+        public int MinTabletGoodModsToHighlight = 1;
 
         // Colors (RGBA)
-        public Vector4 GoodColor = new(0f, 1f, 0f, 1f);       // Green
-        public Vector4 BadColor = new(1f, 0f, 0f, 1f);        // Red
+        public Vector4 GoodColor = new(0.0f, 0.85f, 1.0f, 1.0f);       // Waystone Good (Vibrant Cyan)
+        public Vector4 BadColor = new(1.0f, 0.25f, 0.0f, 1.0f);        // Waystone Bad (Red-Orange)
+        public Vector4 TabletGoodColor = new(0.85f, 0.2f, 1.0f, 1.0f); // Tablet Good (Purple/Magenta)
+        public Vector4 TabletBadColor = new(0.75f, 0.0f, 0.15f, 1.0f);  // Tablet Bad (Deep Red)
         public Vector4 NeutralColor = new(1f, 1f, 0f, 0.7f);   // Yellow
         public Vector4 NormalRarityColor = new(0.8f, 0.8f, 0.8f, 1f);
         public Vector4 MagicRarityColor = new(0.4f, 0.6f, 1f, 1f);
         public Vector4 RareRarityColor = new(1f, 0.85f, 0f, 1f);
         public Vector4 ColorGreat = new(10f / 255f, 212f / 255f, 7f / 255f, 1.0f);
+        public Vector4 TabletColorGreat = new(255f / 255f, 200f / 255f, 0f / 255f, 1.0f); // Gold for GREAT Tablet arrow
 
         // Visuals
         public float BorderThickness = 3f;
@@ -88,6 +92,7 @@ namespace StashUtility
         public float RarityIndicatorSize = 10f;
         public bool ShowRarityBorder = true;
         public bool ShowModBorder = true;
+        public bool ShowTabletModBorder = true;
         public bool HideNormalWaystones = false;
 
         public int FrameStyleBad = 0;   // 0: Solid, 1: Dashed, 2: Dotted

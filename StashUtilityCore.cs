@@ -623,6 +623,23 @@ namespace StashUtility
                 ImGui.Indent();
                 if (ImGui.CollapsingHeader(PluginText.T("stashutility.tablet_mod_manager_header", "Tablet Mod Filter Manager")))
                 {
+                    ImGui.SetNextItemWidth(150f);
+                    if (ImGui.SliderInt(PluginText.T("stashutility.min_tablet_mods_to_highlight", "Min Good Mods To Highlight"), ref Settings.MinTabletGoodModsToHighlight, 1, 5)) SaveSettings();
+                    
+                    ImGui.SetNextItemWidth(150f);
+                    if (ImGui.SliderInt(PluginText.T("stashutility.min_good_mods_to_ignore_bad", "Min Good Mods To Ignore Bad"), ref Settings.MinGoodModsToIgnoreBad, 0, 6)) SaveSettings();
+                    ImGuiHelper.ToolTip(PluginText.T("stashutility.min_good_mods_to_ignore_bad_tooltip", "If a tablet has this many good mods, it will ignore any bad mods and still be highlighted as Good/Great."));
+
+                    if (ImGui.Checkbox(PluginText.T("stashutility.filter_tablet_great", "Filter Tablet Great Status"), ref Settings.FilterTabletGreat)) SaveSettings();
+                    if (Settings.FilterTabletGreat)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        if (ImGui.SliderInt(PluginText.T("stashutility.min_good_tablet_mods", "Min Good Tablet Mods Count"), ref Settings.MinTabletGoodMods, 1, 5)) SaveSettings();
+                    }
+                    ImGui.Spacing();
+
                     if (ImGui.BeginTabBar("TabletMechanicsTabs"))
                     {
                         var categories = new Dictionary<string, Func<Models.TabletMod, bool>>
@@ -675,6 +692,7 @@ namespace StashUtility
                                             else { Settings.TabletGodModPatterns.Remove(mod.Id); }
                                             SaveSettings();
                                         }
+                                        ImGuiHelper.ToolTip(PluginText.T("stashutility.tablet.god_tooltip", "A God mod immediately flags the tablet as Good/Great, ignoring any Bad mods."));
                                         ImGui.Separator();
                                     }
                                 }
@@ -686,26 +704,13 @@ namespace StashUtility
                     }
                 }
 
-                if (ImGui.CollapsingHeader(PluginText.T("stashutility.tablet_great_conditions_header", "Tablet GREAT Highlight Conditions")))
-                {
-                    ImGui.Checkbox(PluginText.T("stashutility.filter_tablet_great", "Filter Tablet Great Status"), ref Settings.FilterTabletGreat);
-                    if (Settings.FilterTabletGreat)
-                    {
-                        ImGui.SameLine();
-                        ImGui.SetCursorPosX(300f);
-                        ImGui.SetNextItemWidth(150f);
-                        ImGui.SliderInt(PluginText.T("stashutility.min_good_tablet_mods", "Min Good Tablet Mods Count"), ref Settings.MinTabletGoodMods, 1, 5);
-                    }
-                    ImGui.SetNextItemWidth(150f);
-                    ImGui.SliderInt(PluginText.T("stashutility.min_good_mods_to_ignore_bad", "Min Good Mods To Ignore Bad"), ref Settings.MinGoodModsToIgnoreBad, 1, 6);
-                    ImGuiHelper.ToolTip(PluginText.T("stashutility.min_good_mods_to_ignore_bad_tooltip", "If a tablet has this many good mods, it will ignore any bad mods and still be highlighted as Good/Great."));
-                }
                 ImGui.Unindent();
             }
 
             if (ImGui.CollapsingHeader(PluginText.T("stashutility.visual_settings_header", "Overlay Visual Settings")))
             {
-                ImGui.Checkbox(PluginText.T("stashutility.show_mod_border", "Show Mod Highlight Border"), ref Settings.ShowModBorder);
+                ImGui.Checkbox(PluginText.T("stashutility.show_waystone_mod_border", "Show Waystone Mod Highlight Border"), ref Settings.ShowModBorder);
+                ImGui.Checkbox(PluginText.T("stashutility.show_tablet_mod_border", "Show Tablet Mod Highlight Border"), ref Settings.ShowTabletModBorder);
                 ImGui.Checkbox(PluginText.T("stashutility.show_rarity_border", "Show Rarity Corner Indicator"), ref Settings.ShowRarityBorder);
                 if (Settings.ShowRarityBorder)
                 {
@@ -735,9 +740,12 @@ namespace StashUtility
                 ImGui.SliderFloat(PluginText.T("stashutility.great_arrow_size", "GREAT Arrow Size"), ref Settings.GreatIndicatorSize, 5f, 40f);
 
                 ImGui.SeparatorText(PluginText.T("stashutility.colors_section", "Colors"));
-                ImGui.ColorEdit4(PluginText.T("stashutility.good_color", "Good Highlight Color"), ref Settings.GoodColor);
-                ImGui.ColorEdit4(PluginText.T("stashutility.bad_color", "Bad Highlight Color"), ref Settings.BadColor);
-                ImGui.ColorEdit4(PluginText.T("stashutility.great_color", "GREAT Arrow Color"), ref Settings.ColorGreat);
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.good_color", "Waystone Good Highlight Color"), ref Settings.GoodColor)) SaveSettings();
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.bad_color", "Waystone Bad Highlight Color"), ref Settings.BadColor)) SaveSettings();
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.tablet_good_color", "Tablet Good Highlight Color"), ref Settings.TabletGoodColor)) SaveSettings();
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.tablet_bad_color", "Tablet Bad Highlight Color"), ref Settings.TabletBadColor)) SaveSettings();
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.waystone_great_color", "Waystone GREAT Arrow Color"), ref Settings.ColorGreat)) SaveSettings();
+                if (ImGui.ColorEdit4(PluginText.T("stashutility.tablet_great_color", "Tablet GREAT Arrow Color"), ref Settings.TabletColorGreat)) SaveSettings();
                 ImGui.ColorEdit4(PluginText.T("stashutility.rare_color", "Rare Rarity Color"), ref Settings.RareRarityColor);
                 ImGui.ColorEdit4(PluginText.T("stashutility.magic_color", "Magic Rarity Color"), ref Settings.MagicRarityColor);
                 ImGui.ColorEdit4(PluginText.T("stashutility.normal_color", "Normal Rarity Color"), ref Settings.NormalRarityColor);
@@ -1343,6 +1351,11 @@ namespace StashUtility
                         isGood = true;
                     }
 
+                    if (!isGod && tabletGoodCount < Settings.MinTabletGoodModsToHighlight)
+                    {
+                        isGood = false;
+                    }
+
                     if (Settings.FilterTabletGreat)
                     {
                         isGreat = isGod || tabletGoodCount >= Settings.MinTabletGoodMods;
@@ -1378,9 +1391,13 @@ namespace StashUtility
             float margin = Settings.BorderMargin * scale; // Adaptive margin for 4K scaling where bounding boxes overlap
             float activeBorderThickness = 0f;
 
-            if (Settings.ShowModBorder && (isBad || isGood || passesNumericalFilters))
+            bool showModBorder = (isWaystone && Settings.ShowModBorder) || (isTablet && Settings.ShowTabletModBorder);
+
+            if (showModBorder && (isBad || isGood || passesNumericalFilters))
             {
-                Vector4 borderCol = isBad ? Settings.BadColor : Settings.GoodColor;
+                Vector4 borderCol = isTablet 
+                    ? (isBad ? Settings.TabletBadColor : Settings.TabletGoodColor)
+                    : (isBad ? Settings.BadColor : Settings.GoodColor);
                 float thickness = isBad ? Settings.BorderThickness : Math.Max(1.5f, Settings.BorderThickness - 0.5f);
                 int style = isBad ? Settings.FrameStyleBad : Settings.FrameStyleGood;
 
@@ -1428,7 +1445,8 @@ namespace StashUtility
                 };
 
                 var dl = ImGui.GetBackgroundDrawList();
-                dl.AddTriangleFilled(topTip, topTip + new Vector2(-arrowSize / 2, arrowSize), topTip + new Vector2(arrowSize / 2, arrowSize), ImGuiHelper.Color(Settings.ColorGreat));
+                Vector4 arrowCol = isTablet ? Settings.TabletColorGreat : Settings.ColorGreat;
+                dl.AddTriangleFilled(topTip, topTip + new Vector2(-arrowSize / 2, arrowSize), topTip + new Vector2(arrowSize / 2, arrowSize), ImGuiHelper.Color(arrowCol));
                 dl.AddTriangle(topTip, topTip + new Vector2(-arrowSize / 2, arrowSize), topTip + new Vector2(arrowSize / 2, arrowSize), 0xFF000000, Math.Max(1.0f, 1.5f * scale));
             }
         }
