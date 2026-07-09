@@ -23,11 +23,40 @@ namespace StashUtility
     {
         private object handleObj;
         private MethodInfo readStdWStringMethod;
-        private object uiParentsObj;
+        private object uiParentsObj;   // Parent cache for P1 / Single-Player slots
+        private object uiParentsObjP2; // Separate parent cache for P2 slots (avoids cross-panel position corruption)
+        private object currentUiParentsObj; // Points to either uiParentsObj or uiParentsObjP2 during processing
+        private MethodInfo updateCacheMethod;
 
         private readonly Dictionary<Type, MethodInfo> readMemoryMethods = new();
         private readonly Dictionary<Type, MethodInfo> readStdVectorMethods = new();
         private readonly Dictionary<Type, MethodInfo> tryReadMemoryMethods = new();
+
+        private struct CoopDebugInfo
+        {
+            public bool IsCoopMode;
+            public IntPtr P1LeftPanel;
+            public IntPtr P1StashTabsContainer;
+            public IntPtr P1ActiveTab;
+            public string P1Status;
+            public List<string> P1TabsInfo;
+            public IntPtr P2RightPanel;
+            public IntPtr P2StashTabsContainer;
+            public IntPtr P2ActiveTab;
+            public string P2Status;
+            public List<string> P2TabsInfo;
+        }
+        private CoopDebugInfo coopDebug = new() { P1TabsInfo = new(), P2TabsInfo = new() };
+
+        private struct SinglePlayerDebugInfo
+        {
+            public IntPtr LeftPanel;
+            public string StashTabsPath;
+            public IntPtr StashTabsContainer;
+            public IntPtr ActiveTab;
+            public string Status;
+        }
+        private SinglePlayerDebugInfo spDebug = new();
 
         private readonly List<string> probeLog = new();
         private string waystoneSearchTerm = string.Empty;
@@ -173,6 +202,55 @@ namespace StashUtility
 
             if (Settings.EnableDebugProbe)
             {
+                var settingsGameUi = Core.States.InGameStateObject.GameUi;
+                if (settingsGameUi != null && settingsGameUi.Address != IntPtr.Zero)
+                {
+                    ImGui.SeparatorText("Active Stash Processing Debug Info");
+                    bool isCoopMode = Core.GHSettings.EnableControllerMode && settingsGameUi.LeftPanel.Address != IntPtr.Zero;
+                    if (isCoopMode)
+                    {
+                        ImGui.Text($"Coop Mode: TRUE");
+                        ImGui.Text($"P1 LeftPanel: 0x{coopDebug.P1LeftPanel.ToInt64():X}");
+                        ImGui.Text($"P1 StashTabsContainer: 0x{coopDebug.P1StashTabsContainer.ToInt64():X}");
+                        ImGui.Text($"P1 ActiveTab: 0x{coopDebug.P1ActiveTab.ToInt64():X}");
+                        ImGui.Text($"P1 Status: {coopDebug.P1Status}");
+                        
+                        if (coopDebug.P1TabsInfo != null && coopDebug.P1TabsInfo.Count > 0 && ImGui.TreeNode("P1 Tabs List Details"))
+                        {
+                            foreach (var info in coopDebug.P1TabsInfo)
+                            {
+                                ImGui.Text(info);
+                            }
+                            ImGui.TreePop();
+                        }
+
+                        ImGui.Separator();
+                        ImGui.Text($"P2 RightPanel: 0x{coopDebug.P2RightPanel.ToInt64():X}");
+                        ImGui.Text($"P2 StashTabsContainer: 0x{coopDebug.P2StashTabsContainer.ToInt64():X}");
+                        ImGui.Text($"P2 ActiveTab: 0x{coopDebug.P2ActiveTab.ToInt64():X}");
+                        ImGui.Text($"P2 Status: {coopDebug.P2Status}");
+
+                        if (coopDebug.P2TabsInfo != null && coopDebug.P2TabsInfo.Count > 0 && ImGui.TreeNode("P2 Tabs List Details"))
+                        {
+                            foreach (var info in coopDebug.P2TabsInfo)
+                            {
+                                ImGui.Text(info);
+                            }
+                            ImGui.TreePop();
+                        }
+                    }
+                    else
+                    {
+                        ImGui.Text($"Coop Mode: FALSE (Single Player)");
+                        ImGui.Text($"LeftPanel: 0x{spDebug.LeftPanel.ToInt64():X}");
+                        ImGui.Text($"StashTabsPath: {spDebug.StashTabsPath}");
+                        ImGui.Text($"StashTabsContainer: 0x{spDebug.StashTabsContainer.ToInt64():X}");
+                        ImGui.Text($"ActiveTab: 0x{spDebug.ActiveTab.ToInt64():X}");
+                        ImGui.Text($"Status: {spDebug.Status}");
+                    }
+                    ImGui.Spacing();
+                }
+
                 debugHoveredCurrentElement = false;
                 debugHoveredAllChildren = false;
                 debugHoveredChildIndex = -1;
@@ -796,6 +874,89 @@ namespace StashUtility
             return true;
         }
 
+        private bool IsTabVisible(IntPtr address)
+        {
+            if (address == IntPtr.Zero) return false;
+            var off = ReadMemory<UiElementBaseOffset>(address);
+            if (off.Self != IntPtr.Zero && off.Self != address)
+            {
+                return false;
+            }
+            return UiElementBaseFuncs.IsVisibleChecker(off.Flags);
+        }
+
+        private bool IsActiveTab(IntPtr tab, out string tabType)
+        {
+            // IMPORTANT: Do NOT call CreateUiElement anywhere in this method.
+            // CreateUiElement calls parents.AddIfNotExists() on its parent pointer, which contaminates
+            // the shared uiParentsObj parent cache. When item slots are later created with CreateUiElement
+            // they walk the poisoned cache and compute wrong absolute positions => overlay offset.
+            // We check visibility and size exclusively through raw memory (UiElementBaseOffset).
+
+            tabType = "Unknown";
+            if (tab == IntPtr.Zero) return false;
+
+            // First check if the tab itself is visible
+            if (!IsElementVisible(tab)) return false;
+
+            // Helper: check if a resolved address is visible with non-zero UnscaledSize.X
+            bool HasNonZeroSize(IntPtr addr)
+            {
+                if (addr == IntPtr.Zero) return false;
+                var off = ReadMemory<UiElementBaseOffset>(addr);
+                return UiElementBaseFuncs.IsVisibleChecker(off.Flags) && off.UnscaledSize.X > 0f;
+            }
+
+            // 1. Check Waystone tab: tab -> 0 -> 1 has 16 children (tiers)
+            var child01 = ResolvePath(tab, new int[] { 0, 1 });
+            if (child01 != IntPtr.Zero)
+            {
+                var off01 = ReadMemory<UiElementBaseOffset>(child01);
+                var kids01 = ReadStdVector<IntPtr>(off01.ChildrensPtr);
+                if (kids01.Length == 16 && HasNonZeroSize(child01))
+                {
+                    tabType = "Waystone";
+                    return true;
+                }
+            }
+
+            // 2. Check Fragment tab: tab -> 0 -> 0 -> 0 -> 1 has 6 children (pages)
+            var childFrag = ResolvePath(tab, new int[] { 0, 0, 0, 1 });
+            if (childFrag != IntPtr.Zero)
+            {
+                var offFrag = ReadMemory<UiElementBaseOffset>(childFrag);
+                var kidsFrag = ReadStdVector<IntPtr>(offFrag.ChildrensPtr);
+                if (kidsFrag.Length == 6 && HasNonZeroSize(childFrag))
+                {
+                    tabType = "Fragment";
+                    return true;
+                }
+            }
+
+            // 4. Check normal grid: tab -> 0 -> 0 visible and non-zero size
+            var child00 = ResolvePath(tab, new int[] { 0, 0 });
+            if (child00 != IntPtr.Zero && HasNonZeroSize(child00))
+            {
+                tabType = "Normal/Quad (0->0)";
+                return true;
+            }
+
+            // 5. In coop mode, a normal grid might be flatter: tab -> 0 directly
+            var child0 = ResolvePath(tab, new int[] { 0 });
+            if (child0 != IntPtr.Zero && HasNonZeroSize(child0))
+            {
+                var off0 = ReadMemory<UiElementBaseOffset>(child0);
+                var slots = ReadStdVector<IntPtr>(off0.ChildrensPtr);
+                if (slots.Length > 0 && slots.Any(k => k != IntPtr.Zero && GetItemAddressFromElement(k) != IntPtr.Zero))
+                {
+                    tabType = "Normal/Quad (Flat 0)";
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public override void DrawUI()
         {
             if (!Settings.EnableWaystoneManager && !Settings.EnableTabletManager && !Settings.EnableDebugProbe && !Settings.EnableMerchantPurchasePanel) return;
@@ -814,6 +975,14 @@ namespace StashUtility
             var gameUi = Core.States.InGameStateObject.GameUi;
             if (gameUi == null || gameUi.Address == IntPtr.Zero) return;
 
+            // Update the parent caches every frame to refresh stale parent positions/coordinates.
+            // This is extremely fast (parallel memory reads) and avoids GC allocations from clearing the cache.
+            if (this.updateCacheMethod != null)
+            {
+                if (this.uiParentsObj != null) this.updateCacheMethod.Invoke(this.uiParentsObj, null);
+                if (this.uiParentsObjP2 != null) this.updateCacheMethod.Invoke(this.uiParentsObjP2, null);
+            }
+
             if (Settings.EnableDebugProbe)
             {
                 DrawDebugOverlay();
@@ -821,112 +990,181 @@ namespace StashUtility
 
             if (Settings.EnableWaystoneManager || Settings.EnableTabletManager)
             {
-                // Resolve Path
-                int[] pathIndices;
-                try
-                {
-                    pathIndices = Settings.PathString.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                        .Select(int.Parse)
-                        .ToArray();
-                }
-                catch
-                {
-                    lock (probeLog)
-                    {
-                        probeLog.Clear();
-                        probeLog.Add("Error: Path String is not in a valid format (must be comma-separated integers)");
-                    }
-                    return;
-                }
+                bool isCoopMode = Core.GHSettings.EnableControllerMode && gameUi.LeftPanel.Address != IntPtr.Zero;
 
-                int[] stashTabsContainerPath;
-                if (pathIndices.Length >= 12 && pathIndices[pathIndices.Length - 4] == 0 && pathIndices[pathIndices.Length - 3] == 0 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
+                if (isCoopMode)
                 {
-                    // Fragment stash tab layout (e.g. 2,0,0,0,0,1,1,40,0,0,0,1)
-                    stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 5).ToArray();
-                }
-                else if (pathIndices.Length >= 9 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
-                {
-                    // Waystone stash tab layout (e.g. 2,0,0,0,1,1,45,0,1)
-                    stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 3).ToArray();
+                    coopDebug.IsCoopMode = true;
+                    coopDebug.P1LeftPanel = gameUi.LeftPanel.Address;
+                    coopDebug.P2RightPanel = gameUi.RightPanel.Address;
+
+                    // Player 1 (LeftPanel)
+                    if (gameUi.LeftPanel.Address != IntPtr.Zero && IsElementVisible(gameUi.LeftPanel.Address))
+                    {
+                        this.currentUiParentsObj = this.uiParentsObj;
+
+                        // 1. Player 1 inventory: LeftPanel -> 3 -> 0 -> 0 -> 1 -> 0 -> 2
+                        // Check inventory panel container (3 -> 0 -> 0 -> 1) is visible first
+                        var invPanelContainerP1 = ResolvePath(gameUi.LeftPanel.Address, new int[] { 3, 0, 0, 1 });
+                        var inventoryGridRoot = (invPanelContainerP1 != IntPtr.Zero && IsElementVisible(invPanelContainerP1))
+                            ? ResolvePath(invPanelContainerP1, new int[] { 0, 2 })
+                            : IntPtr.Zero;
+                        if (inventoryGridRoot != IntPtr.Zero)
+                        {
+                            ProcessNormalTab(inventoryGridRoot);
+                        }
+
+                        // 2. Player 1 stash tabs: LeftPanel -> 3 -> 0 -> 0 -> 0 -> 2
+                        // Check the stash panel container (3 -> 0 -> 0 -> 0) is visible before processing stash tabs
+                        var stashPanelContainerP1 = ResolvePath(gameUi.LeftPanel.Address, new int[] { 3, 0, 0, 0 });
+                        var stashTabsContainer = (stashPanelContainerP1 != IntPtr.Zero && IsElementVisible(stashPanelContainerP1))
+                            ? ResolvePath(stashPanelContainerP1, new int[] { 2 })
+                            : IntPtr.Zero;
+                        if (stashTabsContainer != IntPtr.Zero)
+                        {
+                            ProcessCoopStashTabs(stashTabsContainer, 1);
+                        }
+                        else
+                        {
+                            coopDebug.P1StashTabsContainer = IntPtr.Zero;
+                            coopDebug.P1Status = stashPanelContainerP1 == IntPtr.Zero
+                                ? "Stash panel container path resolution failed (LeftPanel -> 3 -> 0 -> 0 -> 0)"
+                                : "Stash panel is not visible (closed)";
+                        }
+                    }
+                    else
+                    {
+                        coopDebug.P1Status = gameUi.LeftPanel.Address == IntPtr.Zero ? "LeftPanel address is null" : "LeftPanel is not visible";
+                    }
+
+                    // Player 2 (RightPanel)
+                    if (gameUi.RightPanel.Address != IntPtr.Zero && IsElementVisible(gameUi.RightPanel.Address))
+                    {
+                        this.currentUiParentsObj = this.uiParentsObjP2;
+
+                        // 1. Player 2 inventory: RightPanel -> 3 -> 0 -> 0 -> 1 -> 0 -> 2
+                        // Check inventory panel container (3 -> 0 -> 0 -> 1) is visible first
+                        var invPanelContainerP2 = ResolvePath(gameUi.RightPanel.Address, new int[] { 3, 0, 0, 1 });
+                        var inventoryGridRoot = (invPanelContainerP2 != IntPtr.Zero && IsElementVisible(invPanelContainerP2))
+                            ? ResolvePath(invPanelContainerP2, new int[] { 0, 2 })
+                            : IntPtr.Zero;
+                        if (inventoryGridRoot != IntPtr.Zero)
+                        {
+                            ProcessNormalTab(inventoryGridRoot);
+                        }
+
+                        // 2. Player 2 stash tabs: RightPanel -> 3 -> 0 -> 0 -> 0 -> 2
+                        // Check the stash panel container (3 -> 0 -> 0 -> 0) is visible before processing stash tabs
+                        var stashPanelContainerP2 = ResolvePath(gameUi.RightPanel.Address, new int[] { 3, 0, 0, 0 });
+                        var stashTabsContainerP2 = (stashPanelContainerP2 != IntPtr.Zero && IsElementVisible(stashPanelContainerP2))
+                            ? ResolvePath(stashPanelContainerP2, new int[] { 2 })
+                            : IntPtr.Zero;
+                        if (stashTabsContainerP2 != IntPtr.Zero)
+                        {
+                            ProcessCoopStashTabs(stashTabsContainerP2, 2);
+                        }
+                        else
+                        {
+                            coopDebug.P2StashTabsContainer = IntPtr.Zero;
+                            coopDebug.P2Status = stashPanelContainerP2 == IntPtr.Zero
+                                ? "Stash panel container path resolution failed (RightPanel -> 3 -> 0 -> 0 -> 0)"
+                                : "Stash panel is not visible (closed)";
+                        }
+                    }
+                    else
+                    {
+                        coopDebug.P2Status = gameUi.RightPanel.Address == IntPtr.Zero ? "RightPanel address is null" : "RightPanel is not visible";
+                    }
                 }
                 else
                 {
-                    // Fallback / default behavior
-                    stashTabsContainerPath = pathIndices.Length >= 6 
-                        ? pathIndices.Take(6).ToArray() 
-                        : new int[] { 2, 0, 0, 0, 1, 1 };
-                }
+                    coopDebug.IsCoopMode = false;
+                    spDebug.LeftPanel = gameUi.LeftPanel.Address;
+                    this.currentUiParentsObj = this.uiParentsObj;
 
-                var stashTabsContainer = ResolvePath(gameUi.LeftPanel.Address, stashTabsContainerPath);
-                if (stashTabsContainer != IntPtr.Zero)
-                {
-                    var tabsOffsets = ReadMemory<UiElementBaseOffset>(stashTabsContainer);
-                    var tabs = ReadStdVector<IntPtr>(tabsOffsets.ChildrensPtr);
-
-                    IntPtr activeTabAddr = IntPtr.Zero;
-                    foreach (var tab in tabs)
+                    // Resolve Path
+                    int[] pathIndices;
+                    try
                     {
-                        if (tab == IntPtr.Zero) continue;
-                        if (IsElementVisible(tab))
+                        pathIndices = Settings.PathString.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                            .Select(int.Parse)
+                            .ToArray();
+                    }
+                    catch
+                    {
+                        lock (probeLog)
                         {
-                            activeTabAddr = tab;
-                            break;
+                            probeLog.Clear();
+                            probeLog.Add("Error: Path String is not in a valid format (must be comma-separated integers)");
+                        }
+                        return;
+                    }
+
+                    int[] stashTabsContainerPath;
+                    if (pathIndices.Length >= 12 && pathIndices[pathIndices.Length - 4] == 0 && pathIndices[pathIndices.Length - 3] == 0 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
+                    {
+                        // Fragment stash tab layout (e.g. 2,0,0,0,0,1,1,40,0,0,0,1)
+                        stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 5).ToArray();
+                    }
+                    else if (pathIndices.Length >= 9 && pathIndices[pathIndices.Length - 2] == 0 && pathIndices[pathIndices.Length - 1] == 1)
+                    {
+                        // Waystone stash tab layout (e.g. 2,0,0,0,1,1,45,0,1)
+                        stashTabsContainerPath = pathIndices.Take(pathIndices.Length - 3).ToArray();
+                    }
+                    else
+                    {
+                        // Fallback / default behavior
+                        stashTabsContainerPath = pathIndices.Length >= 6 
+                            ? pathIndices.Take(6).ToArray() 
+                            : new int[] { 2, 0, 0, 0, 1, 1 };
+                    }
+
+                    spDebug.StashTabsPath = string.Join(",", stashTabsContainerPath);
+                    var stashTabsContainer = ResolvePath(gameUi.LeftPanel.Address, stashTabsContainerPath);
+                    if (stashTabsContainer == IntPtr.Zero)
+                    {
+                        // Fallback 1: Try default waystone/normal stash tabs container path (2,0,0,0,1,1)
+                        var fbPath1 = new int[] { 2, 0, 0, 0, 1, 1 };
+                        stashTabsContainer = ResolvePath(gameUi.LeftPanel.Address, fbPath1);
+                        if (stashTabsContainer != IntPtr.Zero)
+                        {
+                            stashTabsContainerPath = fbPath1;
+                            spDebug.StashTabsPath = string.Join(",", fbPath1) + " (Fallback Waystone/Normal)";
+                        }
+                        else
+                        {
+                            // Fallback 2: Try default fragment stash tabs container path (2,0,0,0,0,1,1)
+                            var fbPath2 = new int[] { 2, 0, 0, 0, 0, 1, 1 };
+                            stashTabsContainer = ResolvePath(gameUi.LeftPanel.Address, fbPath2);
+                            if (stashTabsContainer != IntPtr.Zero)
+                            {
+                                stashTabsContainerPath = fbPath2;
+                                spDebug.StashTabsPath = string.Join(",", fbPath2) + " (Fallback Fragment)";
+                            }
                         }
                     }
 
-                    if (activeTabAddr != IntPtr.Zero)
+                    if (stashTabsContainer != IntPtr.Zero)
                     {
-                        // 1. Check if it's the Waystone stash tab: activeTabAddr -> 0 -> 1 has 16 children (tiers)
-                        bool processedAsWaystone = false;
-                        var waystonesTabRoot = ResolvePath(activeTabAddr, new int[] { 0, 1 });
-                        if (waystonesTabRoot != IntPtr.Zero)
-                        {
-                            var waystoneOffsets = ReadMemory<UiElementBaseOffset>(waystonesTabRoot);
-                            var waystoneKids = ReadStdVector<IntPtr>(waystoneOffsets.ChildrensPtr);
-                            if (waystoneKids.Length == 16)
-                            {
-                                ProcessWaystoneTab(waystoneKids);
-                                processedAsWaystone = true;
-                            }
-                        }
-
-                        if (!processedAsWaystone)
-                        {
-                            // 2. Check if it's a Fragment stash tab with tablets: activeTabAddr -> 0 -> 0 -> 0 -> 1 has 6 children (pages)
-                            bool processedAsFragmentTablets = false;
-                            var fragmentTabletsRoot = ResolvePath(activeTabAddr, new int[] { 0, 0, 0, 1 });
-                            if (fragmentTabletsRoot != IntPtr.Zero)
-                            {
-                                var fragmentOffsets = ReadMemory<UiElementBaseOffset>(fragmentTabletsRoot);
-                                var fragmentKids = ReadStdVector<IntPtr>(fragmentOffsets.ChildrensPtr);
-                                if (fragmentKids.Length == 6)
-                                {
-                                    ProcessFragmentTabletsTab(fragmentKids);
-                                    processedAsFragmentTablets = true;
-                                }
-                            }
-
-                            if (!processedAsFragmentTablets)
-                            {
-                                // 3. Otherwise, check if it's a normal/quad stash tab: activeTabAddr -> 0 -> 0 has slots directly
-                                var normalGridRoot = ResolvePath(activeTabAddr, new int[] { 0, 0 });
-                                if (normalGridRoot != IntPtr.Zero)
-                                {
-                                    ProcessNormalTab(normalGridRoot);
-                                }
-                            }
-                        }
+                        ProcessStashTabs(stashTabsContainer);
                     }
-                }
-
-                // 3. Process Character Inventory Panel if open: RightPanel -> 5 -> 36
-                if (gameUi.RightPanel.Address != IntPtr.Zero && IsElementVisible(gameUi.RightPanel.Address))
-                {
-                    var inventoryGridRoot = ResolvePath(gameUi.RightPanel.Address, new int[] { 5, 36 });
-                    if (inventoryGridRoot != IntPtr.Zero)
+                    else
                     {
-                        ProcessNormalTab(inventoryGridRoot);
+                        spDebug.StashTabsContainer = IntPtr.Zero;
+                        spDebug.Status = $"StashTabsContainer path resolution failed for path: {spDebug.StashTabsPath}";
+                    }
+
+                    // 3. Process Character Inventory Panel if open: RightPanel -> 5 -> 36
+                    if (gameUi.RightPanel.Address != IntPtr.Zero && IsElementVisible(gameUi.RightPanel.Address))
+                    {
+                        var inventoryPanelSP = ResolvePath(gameUi.RightPanel.Address, new int[] { 5 });
+                        var inventoryGridRoot = (inventoryPanelSP != IntPtr.Zero && IsElementVisible(inventoryPanelSP))
+                            ? ResolvePath(inventoryPanelSP, new int[] { 36 })
+                            : IntPtr.Zero;
+                        if (inventoryGridRoot != IntPtr.Zero)
+                        {
+                            ProcessNormalTab(inventoryGridRoot);
+                        }
                     }
                 }
             }
@@ -1008,7 +1246,7 @@ namespace StashUtility
                         if (!UiElementBaseFuncs.IsVisibleChecker(slotOff.Flags)) continue;
 
                         // Retrieve screen bounds for slot
-                        var el = PluginUiElementReflection.CreateUiElement(slot, this.uiParentsObj);
+                        var el = PluginUiElementReflection.CreateUiElement(slot, this.currentUiParentsObj);
                         if (el == null) continue;
 
                         var pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
@@ -1054,7 +1292,7 @@ namespace StashUtility
                     if (!UiElementBaseFuncs.IsVisibleChecker(slotOff.Flags)) continue;
 
                     // Retrieve screen bounds for slot
-                    var el = PluginUiElementReflection.CreateUiElement(slot, this.uiParentsObj);
+                    var el = PluginUiElementReflection.CreateUiElement(slot, this.currentUiParentsObj);
                     if (el == null) continue;
 
                     var pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
@@ -1088,7 +1326,7 @@ namespace StashUtility
                 if (!UiElementBaseFuncs.IsVisibleChecker(slotOff.Flags)) continue;
 
                 // Retrieve screen bounds for slot
-                var el = PluginUiElementReflection.CreateUiElement(slot, this.uiParentsObj);
+                var el = PluginUiElementReflection.CreateUiElement(slot, this.currentUiParentsObj);
                 if (el == null) continue;
 
                 var pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
@@ -1107,6 +1345,318 @@ namespace StashUtility
                 }
             }
         }
+
+        private void ProcessStashTabs(IntPtr stashTabsContainer)
+        {
+            spDebug.StashTabsContainer = stashTabsContainer;
+            spDebug.ActiveTab = IntPtr.Zero;
+            spDebug.Status = "No active tab found";
+
+            if (stashTabsContainer == IntPtr.Zero) return;
+
+            var tabsOffsets = ReadMemory<UiElementBaseOffset>(stashTabsContainer);
+            var tabs = ReadStdVector<IntPtr>(tabsOffsets.ChildrensPtr);
+
+            IntPtr activeTabAddr = IntPtr.Zero;
+            int activeTabIdx = -1;
+            string activeTabType = "None";
+
+            // 1. Try to find the tab that is visible and has active/non-zero size children
+            for (int i = 0; i < tabs.Length; i++)
+            {
+                var tab = tabs[i];
+                if (tab == IntPtr.Zero) continue;
+                if (IsActiveTab(tab, out string detectedType))
+                {
+                    activeTabAddr = tab;
+                    activeTabIdx = i;
+                    activeTabType = detectedType;
+                    break;
+                }
+            }
+
+            // 2. Fallback to old behavior if no active tab found by size/structure
+            if (activeTabAddr == IntPtr.Zero)
+            {
+                for (int i = 0; i < tabs.Length; i++)
+                {
+                    var tab = tabs[i];
+                    if (tab == IntPtr.Zero) continue;
+                    if (IsElementVisible(tab))
+                    {
+                        activeTabAddr = tab;
+                        activeTabIdx = i;
+                        activeTabType = "Fallback (Visible)";
+                        break;
+                    }
+                }
+            }
+
+            spDebug.ActiveTab = activeTabAddr;
+            if (activeTabAddr != IntPtr.Zero)
+            {
+                spDebug.Status = $"Active tab index {activeTabIdx} ({activeTabType}) at 0x{activeTabAddr.ToInt64():X}";
+            }
+
+            if (activeTabAddr != IntPtr.Zero)
+            {
+                // 1. Check if it's the Waystone stash tab: activeTabAddr -> 0 -> 1 has 16 children (tiers)
+                bool processedAsWaystone = false;
+                var waystonesTabRoot = ResolvePath(activeTabAddr, new int[] { 0, 1 });
+                if (waystonesTabRoot != IntPtr.Zero)
+                {
+                    var waystoneOffsets = ReadMemory<UiElementBaseOffset>(waystonesTabRoot);
+                    var waystoneKids = ReadStdVector<IntPtr>(waystoneOffsets.ChildrensPtr);
+                    if (waystoneKids.Length == 16)
+                    {
+                        ProcessWaystoneTab(waystoneKids);
+                        processedAsWaystone = true;
+                        spDebug.Status += " | Processed: Waystone Tab";
+                    }
+                }
+
+                if (!processedAsWaystone)
+                {
+                    // 2. Check if it's a Fragment stash tab with tablets: activeTabAddr -> 0 -> 0 -> 0 -> 1 has 6 children (pages)
+                    bool processedAsFragmentTablets = false;
+                    var fragmentTabletsRoot = ResolvePath(activeTabAddr, new int[] { 0, 0, 0, 1 });
+                    if (fragmentTabletsRoot != IntPtr.Zero)
+                    {
+                        var fragmentOffsets = ReadMemory<UiElementBaseOffset>(fragmentTabletsRoot);
+                        var fragmentKids = ReadStdVector<IntPtr>(fragmentOffsets.ChildrensPtr);
+                        if (fragmentKids.Length == 6)
+                        {
+                            ProcessFragmentTabletsTab(fragmentKids);
+                            processedAsFragmentTablets = true;
+                            spDebug.Status += " | Processed: Fragment Tab";
+                        }
+                    }
+
+                    if (!processedAsFragmentTablets)
+                    {
+                        // 3. Otherwise, check if it's a normal/quad stash tab: activeTabAddr -> 0 -> 0 has slots directly
+                        var normalGridRoot = ResolvePath(activeTabAddr, new int[] { 0, 0 });
+                        if (normalGridRoot != IntPtr.Zero)
+                        {
+                            ProcessNormalTab(normalGridRoot);
+                            spDebug.Status += " | Processed: Normal/Quad Tab (0->0)";
+                        }
+                        else
+                        {
+                            spDebug.Status += " | Failed: Not Waystone/Fragment, and 0->0 resolved to null";
+                        }
+                    }
+                }
+            }
+        }
+
+
+        private void ProcessCoopStashTabs(IntPtr stashTabsContainer, int playerNumber)
+        {
+            if (playerNumber == 1)
+            {
+                coopDebug.P1StashTabsContainer = stashTabsContainer;
+                coopDebug.P1ActiveTab = IntPtr.Zero;
+                coopDebug.P1Status = "No active tab found";
+            }
+            else
+            {
+                coopDebug.P2StashTabsContainer = stashTabsContainer;
+                coopDebug.P2ActiveTab = IntPtr.Zero;
+                coopDebug.P2Status = "No active tab found";
+            }
+
+            if (stashTabsContainer == IntPtr.Zero) return;
+
+            var tabsOffsets = ReadMemory<UiElementBaseOffset>(stashTabsContainer);
+            var tabs = ReadStdVector<IntPtr>(tabsOffsets.ChildrensPtr);
+
+            var debugTabsList = new List<string>();
+            IntPtr activeTabAddr = IntPtr.Zero;
+            int activeTabIdx = -1;
+
+            for (int i = 0; i < tabs.Length; i++)
+            {
+                var tab = tabs[i];
+                if (tab == IntPtr.Zero)
+                {
+                    debugTabsList.Add($"[{i}] Null");
+                    continue;
+                }
+
+                var off = ReadMemory<UiElementBaseOffset>(tab);
+                bool localVis = UiElementBaseFuncs.IsVisibleChecker(off.Flags);
+                bool fullVis = IsElementVisible(tab);
+
+                var el = PluginUiElementReflection.CreateUiElement(tab, this.currentUiParentsObj);
+                Vector2 size = Vector2.Zero;
+                Vector2 pos = Vector2.Zero;
+                if (el != null)
+                {
+                    size = (Vector2)PluginUiElementReflection.UiElementSizeProperty!.GetValue(el)!;
+                    pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
+                }
+
+                debugTabsList.Add($"[{i}] 0x{tab.ToInt64():X} | LVis:{localVis} | FVis:{fullVis} | Sz:{(int)size.X}x{(int)size.Y} | Pos:{(int)pos.X},{(int)pos.Y}");
+
+                // Try to find the active tab using IsActiveTab helper
+            }
+
+            string activeTabType = "None";
+
+            // 1. Try to find the tab that is visible and has active/non-zero size children
+            for (int i = 0; i < tabs.Length; i++)
+            {
+                var tab = tabs[i];
+                if (tab == IntPtr.Zero) continue;
+                if (IsActiveTab(tab, out string detectedType))
+                {
+                    activeTabAddr = tab;
+                    activeTabIdx = i;
+                    activeTabType = detectedType;
+                    break;
+                }
+            }
+
+            // 2. Fallback to old behavior if no active tab found by size/structure
+            if (activeTabAddr == IntPtr.Zero)
+            {
+                for (int i = 0; i < tabs.Length; i++)
+                {
+                    var tab = tabs[i];
+                    if (tab == IntPtr.Zero) continue;
+                    var off = ReadMemory<UiElementBaseOffset>(tab);
+                    if (UiElementBaseFuncs.IsVisibleChecker(off.Flags))
+                    {
+                        activeTabAddr = tab;
+                        activeTabIdx = i;
+                        activeTabType = "Fallback (Visible)";
+                        break;
+                    }
+                }
+            }
+
+            if (playerNumber == 1)
+            {
+                coopDebug.P1TabsInfo = debugTabsList;
+                coopDebug.P1ActiveTab = activeTabAddr;
+                if (activeTabAddr != IntPtr.Zero)
+                {
+                    coopDebug.P1Status = $"Active tab index {activeTabIdx} ({activeTabType}) at 0x{activeTabAddr.ToInt64():X}";
+                }
+            }
+            else
+            {
+                coopDebug.P2TabsInfo = debugTabsList;
+                coopDebug.P2ActiveTab = activeTabAddr;
+                if (activeTabAddr != IntPtr.Zero)
+                {
+                    coopDebug.P2Status = $"Active tab index {activeTabIdx} ({activeTabType}) at 0x{activeTabAddr.ToInt64():X}";
+                }
+            }
+
+            if (activeTabAddr != IntPtr.Zero)
+            {
+                // 1. Check if the active tab itself, activeTabAddr -> 0, or activeTabAddr -> 0 -> 0 contains item slots directly.
+                // In coop/controller mode, POE2 often flattens the UI tree layout, rendering item slots directly under the active tab node.
+                bool processedAsGrid = false;
+
+                // Let's check activeTabAddr itself first
+                var selfOffsets = ReadMemory<UiElementBaseOffset>(activeTabAddr);
+                var selfKids = ReadStdVector<IntPtr>(selfOffsets.ChildrensPtr);
+                if (selfKids.Length > 0 && selfKids.Any(k => k != IntPtr.Zero && GetItemAddressFromElement(k) != IntPtr.Zero))
+                {
+                    ProcessNormalTab(activeTabAddr);
+                    processedAsGrid = true;
+                    if (playerNumber == 1) coopDebug.P1Status += " | Processed: Flat Grid (Self)";
+                    else coopDebug.P2Status += " | Processed: Flat Grid (Self)";
+                }
+
+                // Next check activeTabAddr -> 0
+                if (!processedAsGrid)
+                {
+                    var coopGridRoot = ResolvePath(activeTabAddr, new int[] { 0 });
+                    if (coopGridRoot != IntPtr.Zero)
+                    {
+                        var gridOffsets = ReadMemory<UiElementBaseOffset>(coopGridRoot);
+                        var slots = ReadStdVector<IntPtr>(gridOffsets.ChildrensPtr);
+                        if (slots.Length > 0 && slots.Any(k => k != IntPtr.Zero && GetItemAddressFromElement(k) != IntPtr.Zero))
+                        {
+                            ProcessNormalTab(coopGridRoot);
+                            processedAsGrid = true;
+                            if (playerNumber == 1) coopDebug.P1Status += " | Processed: Flat Grid (Self->0)";
+                            else coopDebug.P2Status += " | Processed: Flat Grid (Self->0)";
+                        }
+                    }
+                }
+
+                // Next check activeTabAddr -> 0 -> 0
+                if (!processedAsGrid)
+                {
+                    var normalGridRoot = ResolvePath(activeTabAddr, new int[] { 0, 0 });
+                    if (normalGridRoot != IntPtr.Zero)
+                    {
+                        var gridOffsets = ReadMemory<UiElementBaseOffset>(normalGridRoot);
+                        var slots = ReadStdVector<IntPtr>(gridOffsets.ChildrensPtr);
+                        if (slots.Length > 0 && slots.Any(k => k != IntPtr.Zero && GetItemAddressFromElement(k) != IntPtr.Zero))
+                        {
+                            ProcessNormalTab(normalGridRoot);
+                            processedAsGrid = true;
+                            if (playerNumber == 1) coopDebug.P1Status += " | Processed: Flat Grid (Self->0->0)";
+                            else coopDebug.P2Status += " | Processed: Flat Grid (Self->0->0)";
+                        }
+                    }
+                }
+
+                if (!processedAsGrid)
+                {
+                    // 2. If not a flattened grid, check nested/special structures
+                    // Check if it's the Waystone stash tab: activeTabAddr -> 0 -> 1 has 16 children (tiers)
+                    bool processedAsWaystone = false;
+                    var waystonesTabRoot = ResolvePath(activeTabAddr, new int[] { 0, 1 });
+                    if (waystonesTabRoot != IntPtr.Zero)
+                    {
+                        var waystoneOffsets = ReadMemory<UiElementBaseOffset>(waystonesTabRoot);
+                        var waystoneKids = ReadStdVector<IntPtr>(waystoneOffsets.ChildrensPtr);
+                        if (waystoneKids.Length == 16)
+                        {
+                            ProcessWaystoneTab(waystoneKids);
+                            processedAsWaystone = true;
+                            if (playerNumber == 1) coopDebug.P1Status += " | Processed: Waystone Tab (16 tiers)";
+                            else coopDebug.P2Status += " | Processed: Waystone Tab (16 tiers)";
+                        }
+                    }
+
+                    if (!processedAsWaystone)
+                    {
+                        // Check if it's a Fragment stash tab with tablets in coop mode: activeTabAddr -> 0 -> 0 -> 0 -> 1 has 6 children (pages)
+                        var fragmentTabletsRoot = ResolvePath(activeTabAddr, new int[] { 0, 0, 0, 1 });
+                        if (fragmentTabletsRoot != IntPtr.Zero)
+                        {
+                            var fragmentOffsets = ReadMemory<UiElementBaseOffset>(fragmentTabletsRoot);
+                            var fragmentKids = ReadStdVector<IntPtr>(fragmentOffsets.ChildrensPtr);
+                            if (fragmentKids.Length == 6)
+                            {
+                                ProcessFragmentTabletsTab(fragmentKids);
+                                if (playerNumber == 1) coopDebug.P1Status += " | Processed: Fragment Tab (6 pages)";
+                                else coopDebug.P2Status += " | Processed: Fragment Tab (6 pages)";
+                            }
+                            else
+                            {
+                                if (playerNumber == 1) coopDebug.P1Status += $" | Failed: Path 0->0->0->1 resolved but has {fragmentKids.Length} children instead of 6";
+                                else coopDebug.P2Status += $" | Failed: Path 0->0->0->1 resolved but has {fragmentKids.Length} children instead of 6";
+                            }
+                        }
+                        else
+                        {
+                            if (playerNumber == 1) coopDebug.P1Status += " | Failed: Not grid, and no nested 0->0->0->1 child found";
+                            else coopDebug.P2Status += " | Failed: Not grid, and no nested 0->0->0->1 child found";
+                        }
+                    }
+                }
+            }
+        }
+
 
         private void DrawDebugOverlay()
         {
@@ -1133,7 +1683,7 @@ namespace StashUtility
             if (address == IntPtr.Zero) return;
             try
             {
-                var el = PluginUiElementReflection.CreateUiElement(address, this.uiParentsObj);
+                var el = PluginUiElementReflection.CreateUiElement(address, this.currentUiParentsObj ?? this.uiParentsObj);
                 if (el != null)
                 {
                     var pos = (Vector2)PluginUiElementReflection.UiElementPositionProperty!.GetValue(el)!;
@@ -1791,7 +2341,16 @@ namespace StashUtility
 
                 var methods = this.handleObj.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                 this.readStdWStringMethod = methods.First(m => m.Name == "ReadStdWString" && m.GetParameters().Length == 1);
-                this.uiParentsObj = PluginUiElementReflection.CreateParents();
+                this.uiParentsObj          = PluginUiElementReflection.CreateParents("p1");
+                this.uiParentsObjP2        = PluginUiElementReflection.CreateParents("p2");
+                this.currentUiParentsObj   = this.uiParentsObj;
+                
+                var uiParentsType = PluginUiElementReflection.UiElementParentsType;
+                if (uiParentsType != null)
+                {
+                    this.updateCacheMethod = uiParentsType.GetMethod("UpdateAllParentsParallel", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+                
                 return true;
             }
             catch
