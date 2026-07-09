@@ -502,6 +502,7 @@ namespace StashUtility
                         ImGui.TableSetupColumn(PluginText.T("stashutility.table.min_limit", "Minimum Limit"), ImGuiTableColumnFlags.WidthFixed, 190f);
                         ImGui.TableSetupColumn(PluginText.T("stashutility.table.max_limit", "Maximum Limit"), ImGuiTableColumnFlags.WidthFixed, 190f);
 
+                        DrawMinMaxFilterTableRow("Explicit Mods", "ExplicitMods", 10, ref Settings.FilterMinExplicitMods, ref Settings.MinExplicitMods, ref Settings.FilterMaxExplicitMods, ref Settings.MaxExplicitMods);
                         DrawMinMaxFilterTableRow("Item Rarity", "ItemRarity", 200, ref Settings.FilterMinItemRarity, ref Settings.MinItemRarity, ref Settings.FilterMaxItemRarity, ref Settings.MaxItemRarity);
                         DrawMinMaxFilterTableRow("Pack Size", "PackSize", 100, ref Settings.FilterMinPackSize, ref Settings.MinPackSize, ref Settings.FilterMaxPackSize, ref Settings.MaxPackSize);
                         DrawMinMaxFilterTableRow("Monster Rarity", "MonsterRarity", 100, ref Settings.FilterMinMonsterRarity, ref Settings.MinMonsterRarity, ref Settings.FilterMaxMonsterRarity, ref Settings.MaxMonsterRarity);
@@ -545,6 +546,24 @@ namespace StashUtility
 
                 if (ImGui.CollapsingHeader(PluginText.T("stashutility.waystone_great_conditions_header", "Waystone GREAT Highlight Conditions")))
                 {
+                    ImGui.Checkbox(PluginText.T("stashutility.filter_great_explicit_mods", "Filter Great Min Explicit Mods Count"), ref Settings.FilterGreatExplicitMods);
+                    if (Settings.FilterGreatExplicitMods)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt(PluginText.T("stashutility.min_great_explicit_mods", "Min Great Explicit Mods"), ref Settings.MinGreatExplicitMods, 0, 10);
+                    }
+
+                    ImGui.Checkbox(PluginText.T("stashutility.filter_great_max_explicit_mods", "Filter Great Max Explicit Mods Count"), ref Settings.FilterGreatMaxExplicitMods);
+                    if (Settings.FilterGreatMaxExplicitMods)
+                    {
+                        ImGui.SameLine();
+                        ImGui.SetCursorPosX(300f);
+                        ImGui.SetNextItemWidth(150f);
+                        ImGui.SliderInt(PluginText.T("stashutility.max_great_explicit_mods", "Max Great Explicit Mods"), ref Settings.MaxGreatExplicitMods, 0, 10);
+                    }
+
                     ImGui.Checkbox(PluginText.T("stashutility.filter_great_rarity", "Filter Great Item Rarity"), ref Settings.FilterGreatRarity);
                     if (Settings.FilterGreatRarity)
                     {
@@ -1163,12 +1182,14 @@ namespace StashUtility
             int sumEffect = 0;
             int sumDropChance = 0;
             int revives = 5;
+            int explicitModsCount = 0;
 
             int tabletGoodCount = 0;
 
             if (modsComponent != null)
             {
-                revives = Math.Max(0, Math.Min(5, 6 - modsComponent.ExplicitMods.Count));
+                explicitModsCount = modsComponent.ExplicitMods.Count;
+                revives = Math.Max(0, Math.Min(5, 6 - explicitModsCount));
                 var statsFromMods = GetStatsFromMods(modsComponent);
                 bool hasMemoryStats = statsFromMods.Count > 0;
                 if (statsFromMods.TryGetValue((GameStats)8210, out var rawDropChance)) sumDropChance = rawDropChance;
@@ -1274,6 +1295,8 @@ namespace StashUtility
                     if (Settings.FilterGreatMonstRarity) { activeFilters++; if (sumMonstRarity < Settings.MinGreatMonstRarity) candidate = false; }
                     if (Settings.FilterGreatEffect) { activeFilters++; if (sumEffect < Settings.MinGreatEffect) candidate = false; }
                     if (Settings.FilterGreatDropChance) { activeFilters++; if (sumDropChance < Settings.MinGreatDropChance) candidate = false; }
+                    if (Settings.FilterGreatExplicitMods) { activeFilters++; if (explicitModsCount < Settings.MinGreatExplicitMods) candidate = false; }
+                    if (Settings.FilterGreatMaxExplicitMods) { activeFilters++; if (explicitModsCount > Settings.MaxGreatExplicitMods) candidate = false; }
 
                     isGreat = activeFilters > 0 && candidate;
                 }
@@ -1306,6 +1329,8 @@ namespace StashUtility
                 if (Settings.FilterMaxMonsterEffectiveness && sumEffect > Settings.MaxMonsterEffectiveness) passesNumericalFilters = false;
                 if (Settings.FilterMinWaystoneDropChance && sumDropChance < Settings.MinWaystoneDropChance) passesNumericalFilters = false;
                 if (Settings.FilterMaxWaystoneDropChance && sumDropChance > Settings.MaxWaystoneDropChance) passesNumericalFilters = false;
+                if (Settings.FilterMinExplicitMods && explicitModsCount < Settings.MinExplicitMods) passesNumericalFilters = false;
+                if (Settings.FilterMaxExplicitMods && explicitModsCount > Settings.MaxExplicitMods) passesNumericalFilters = false;
             }
 
             if (isTablet && !isBad && !isGood) return;

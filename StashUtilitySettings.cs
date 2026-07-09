@@ -46,6 +46,11 @@ namespace StashUtility
         public bool FilterMaxWaystoneDropChance = false;
         public int MaxWaystoneDropChance = 300;
 
+        public bool FilterMinExplicitMods = false;
+        public int MinExplicitMods = 0;
+        public bool FilterMaxExplicitMods = false;
+        public int MaxExplicitMods = 10;
+
         // GREAT Conditions (Waystones)
         public bool FilterGreatRarity = false;
         public int MinGreatRarity = 30;
@@ -57,6 +62,10 @@ namespace StashUtility
         public int MinGreatEffect = 15;
         public bool FilterGreatDropChance = false;
         public int MinGreatDropChance = 120;
+        public bool FilterGreatExplicitMods = false;
+        public int MinGreatExplicitMods = 0;
+        public bool FilterGreatMaxExplicitMods = false;
+        public int MaxGreatExplicitMods = 10;
         public int GreatIndicatorPosition = 0; // 0: Top-Left, 1: Top-Right, 2: Bottom-Left, 3: Bottom-Right
         public float GreatIndicatorSize = 20f;
 
