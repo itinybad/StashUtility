@@ -1757,7 +1757,7 @@ namespace StashUtility
                 }
                 else
                 {
-                    var pathMatch = System.Text.RegularExpressions.Regex.Match(path, @"Waystone(\d+)");
+                    var pathMatch = System.Text.RegularExpressions.Regex.Match(path, @"MapKeyTier(\d+)");
                     if (pathMatch.Success) int.TryParse(pathMatch.Groups[1].Value, out tier);
                 }
 
